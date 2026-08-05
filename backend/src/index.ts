@@ -6,6 +6,7 @@ import { sseManager } from './sse';
 import gameRoutes from './routes/game';
 import assetRoutes from './routes/assets';
 import diceRoutes from './routes/dice';
+import chatRoutes from './routes/chat';
 
 dotenv.config();
 
@@ -50,6 +51,7 @@ app.get('/api', (_req, res) => {
 app.use('/api/game', gameRoutes);
 app.use('/api/assets', assetRoutes);
 app.use('/api/dice', diceRoutes);
+app.use('/api/chat', chatRoutes);
 
 /**
  * SSE stream for real-time game events.

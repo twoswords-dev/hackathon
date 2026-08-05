@@ -65,11 +65,10 @@ export async function updateTurn(
       TableName: TABLE_NAMES.gameState,
       Key: { sessionId },
       UpdateExpression:
-        'SET currentTurnPlayerId = :pid, turnNumber = :tn, waitingForDice = :false, updatedAt = :now',
+        'SET currentTurnPlayerId = :pid, turnNumber = :tn, updatedAt = :now',
       ExpressionAttributeValues: {
         ':pid': nextPlayerId,
         ':tn': turnNumber,
-        ':false': false,
         ':now': new Date().toISOString(),
       },
       ReturnValues: 'ALL_NEW',

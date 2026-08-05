@@ -256,7 +256,7 @@ export default function GameView() {
   });
 
   // Handle player chat messages
-  const handleSendMessage = (text: string) => {
+  const handleSendMessage = async (text: string) => {
     const playerMessage: ChatMessage = {
       id: makeId(),
       role: 'player',
@@ -271,25 +271,49 @@ export default function GameView() {
       const max = parseInt(diceRequest.diceType.replace('d', ''));
       if (!isNaN(num) && num >= 1 && num <= max) {
         handleManualDiceSubmit(num);
+        return;
+      }
+    }
+
+    // Otherwise, ask Bedrock about lore/game
+    if (sessionId) {
+      setIsDmThinking(true);
+      try {
+        const res = await fetch(`/api/chat/${sessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        });
+        const data = await res.json();
+        if (data.reply) {
+          setMessages((prev) => [...prev, {
+            id: makeId(),
+            role: 'dm',
+            text: data.reply,
+            timestamp: Date.now(),
+          }]);
+        } else if (data.error) {
+          setMessages((prev) => [...prev, {
+            id: makeId(),
+            role: 'dm',
+            text: `⚠️ ${data.error}`,
+            timestamp: Date.now(),
+          }]);
+        }
+      } catch {
+        setMessages((prev) => [...prev, {
+          id: makeId(),
+          role: 'dm',
+          text: '⚠️ Could not reach the sage. Try again.',
+          timestamp: Date.now(),
+        }]);
+      } finally {
+        setIsDmThinking(false);
       }
     }
   };
 
-  // Handle dice roll from VideoScreen
-  const handleDiceRoll = async (value: number) => {
-    if (!sessionId || !diceRequest || diceSubmitted) return;
-    setLastRollValue(value);
-    setDiceSubmitted(true);
-
-    try {
-      await submitDiceResult(sessionId, diceRequest.diceType, value, 'physical');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to submit dice result');
-      setDiceSubmitted(false);
-    }
-  };
-
-  // Handle virtual dice roll
+  // Handle virtual dice roll (backend rolls for us)
   const handleVirtualRoll = async () => {
     if (!sessionId || !diceRequest || diceSubmitted) return;
     setDiceSubmitted(true);
@@ -355,7 +379,6 @@ export default function GameView() {
         <VideoScreen
           diceRequest={diceRequest}
           lastRollValue={lastRollValue}
-          onDiceRoll={canRoll ? handleDiceRoll : undefined}
           onVirtualRoll={canRoll ? handleVirtualRoll : undefined}
           pendingDiceType={pendingDiceType}
           diceResult={lastDiceResult}
