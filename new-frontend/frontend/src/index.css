@@ -1,0 +1,20 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "IM Fell English", Georgia, serif;
+  background: #0a0610;
+  color: #e8e2d8;
+}
+
+button {
+  font-family: inherit;
+}

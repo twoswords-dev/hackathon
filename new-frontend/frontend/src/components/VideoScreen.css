@@ -1,0 +1,157 @@
+.video-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 1rem;
+  background: rgb(118, 11, 116);
+  border: 1px solid rgba(212, 175, 55, 0.35);
+  border-radius: 16px;
+  gap: 0.75rem;
+  overflow: hidden;
+}
+
+/* HEADER */
+.video-screen__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.video-screen__header h2 {
+  margin: 0;
+  font-family: "Cinzel", serif;
+  font-size: 1rem;
+  letter-spacing: 0.05em;
+  color: #f5e7b2;
+}
+
+/* LIVE BADGE */
+.video-screen__badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.75);
+  transition: all 0.3s ease;
+}
+
+.video-screen__badge[data-live="true"] {
+  background: rgba(110, 231, 160, 0.18);
+  color: #6ee7a0;
+}
+
+.video-screen__feed {
+
+  position:relative;
+
+  flex:1;
+
+  width:100%;
+
+  height:100%;
+
+  min-height:250px;
+
+
+  background:
+    rgb(118,11,116);
+
+
+  border-radius:14px;
+
+
+  border:
+    1px solid rgba(212,175,55,.35);
+
+
+  display:flex;
+
+  align-items:center;
+
+  justify-content:center;
+
+
+  overflow:hidden;
+
+}
+
+/* RIVE CANVAS STYLING */
+.rive-dice-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* OVERLAY WHEN DISCONNECTED */
+.video-screen__overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none; /* Lets clicks pass through */
+  transition: opacity 0.3s ease;
+}
+
+.video-screen__overlay p {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* CONTROLS */
+.video-screen__controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.video-screen__controls button {
+  flex: 1;
+  padding: 0.5rem 0.6rem;
+  border-radius: 10px;
+  border: 1px solid rgba(212, 175, 55, 0.4);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5e7b2;
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.video-screen__controls button:hover {
+  background: rgba(212, 175, 55, 0.18);
+  transform: translateY(-1px);
+}
+
+.video-screen__roll-btn {
+  color: #ffd966 !important;
+}
+
+/* READOUT BOX */
+.video-screen__readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 10px;
+  border: 1px solid rgba(212, 175, 55, 0.35);
+}
+
+.video-screen__readout span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.video-screen__readout strong {
+  font-family: "Cinzel", serif;
+  font-size: 1.5rem;
+  color: #ffd966;
+}

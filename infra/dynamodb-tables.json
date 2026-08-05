@@ -1,0 +1,87 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Gen DND - DynamoDB Tables",
+  "Parameters": {
+    "TablePrefix": {
+      "Type": "String",
+      "Default": "GenDnd",
+      "Description": "Prefix for all table names"
+    }
+  },
+  "Resources": {
+    "GameSessionsTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": { "Fn::Sub": "${TablePrefix}_GameSessions" },
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          { "AttributeName": "sessionId", "AttributeType": "S" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "sessionId", "KeyType": "HASH" }
+        ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "ttl",
+          "Enabled": true
+        }
+      }
+    },
+    "PlayersTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": { "Fn::Sub": "${TablePrefix}_Players" },
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          { "AttributeName": "sessionId", "AttributeType": "S" },
+          { "AttributeName": "playerId", "AttributeType": "S" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "sessionId", "KeyType": "HASH" },
+          { "AttributeName": "playerId", "KeyType": "RANGE" }
+        ]
+      }
+    },
+    "GameEventsTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": { "Fn::Sub": "${TablePrefix}_GameEvents" },
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          { "AttributeName": "sessionId", "AttributeType": "S" },
+          { "AttributeName": "eventNumber", "AttributeType": "N" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "sessionId", "KeyType": "HASH" },
+          { "AttributeName": "eventNumber", "KeyType": "RANGE" }
+        ]
+      }
+    },
+    "GameStateTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": { "Fn::Sub": "${TablePrefix}_GameState" },
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          { "AttributeName": "sessionId", "AttributeType": "S" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "sessionId", "KeyType": "HASH" }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "GameSessionsTableName": {
+      "Value": { "Ref": "GameSessionsTable" }
+    },
+    "PlayersTableName": {
+      "Value": { "Ref": "PlayersTable" }
+    },
+    "GameEventsTableName": {
+      "Value": { "Ref": "GameEventsTable" }
+    },
+    "GameStateTableName": {
+      "Value": { "Ref": "GameStateTable" }
+    }
+  }
+}
