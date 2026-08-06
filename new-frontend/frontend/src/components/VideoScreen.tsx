@@ -1,5 +1,6 @@
 import type { DiceRequestData, DiceResultData } from "../api/gameApi";
 import "./VideoScreen.css";
+import ContextPanel from "./ContextPanel";
 
 interface VideoScreenProps {
   diceRequest?: DiceRequestData | null;
@@ -8,6 +9,7 @@ interface VideoScreenProps {
   pendingDiceType?: string | null;
   diceResult?: DiceResultData | null;
   diceSubmitted?: boolean;
+  gameSteps?: string[];
 }
 
 export default function VideoScreen({
@@ -16,6 +18,7 @@ export default function VideoScreen({
   onVirtualRoll,
   diceResult,
   diceSubmitted,
+  gameSteps = [],
 }: VideoScreenProps) {
 
   const handleVirtualRoll = () => {
@@ -30,6 +33,8 @@ export default function VideoScreen({
       <header className="video-screen__header">
         <h2>🎲 Dice</h2>
       </header>
+
+      <ContextPanel steps={gameSteps} />
 
       {/* Idle state — no request, no result */}
       {!diceRequest && !diceResult && (
