@@ -8,6 +8,7 @@ export type SSEEventType =
   | 'dice_request'
   | 'dice_result'
   | 'state_update'
+  | 'step_update'
   | 'turn_change'
   | 'map_update'
   | 'player_joined'

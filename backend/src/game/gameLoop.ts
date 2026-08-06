@@ -1,10 +1,68 @@
 import { gameSessions, players, gameEvents, gameState } from '../db';
 import { generateNarrative, DMResponse } from '../agents/dungeonMaster';
 import { sseManager } from '../sse';
-import { DiceResultInput, GameState, Player, StatChange } from '../types/game';
+import { DiceResultInput, GameState, Player, StatChange, Character, CharacterStats } from '../types/game';
 
 // Track active game loops
 const activeGames = new Map<string, { running: boolean }>();
+
+/**
+ * Live, human-readable description of what the game is currently waiting on.
+ * Kept in memory alongside the loop so the UI can render an accurate
+ * "current step" panel and reconnecting clients can rehydrate it.
+ */
+export interface StepInfo {
+  phase: 'idle' | 'narrating' | 'awaiting_roll' | 'resolving' | 'complete';
+  encounter: 'none' | 'combat' | 'boss';
+  title: string;
+  detail: string;
+  eventNumber: number;
+  totalEvents: number;
+  activePlayerId?: string;
+  activePlayerName?: string;
+  characterName?: string;
+  characterClass?: string;
+  characterStats?: CharacterStats | null;
+  diceType?: string;
+  roundNumber?: number;
+  enemyName?: string;
+  enemyHp?: number;
+  enemyMaxHp?: number;
+  lastRoll?: { playerName: string; characterName: string; rollValue: number; maxValue: number; outcome: string } | null;
+  updatedAt: string;
+}
+
+const stepInfoBySession = new Map<string, StepInfo>();
+
+/**
+ * Merge a partial update into the session's step info and broadcast it so every
+ * client's step panel reflects the same state.
+ */
+function setStep(sessionId: string, patch: Partial<StepInfo>): StepInfo {
+  const previous = stepInfoBySession.get(sessionId);
+  const next: StepInfo = {
+    phase: 'idle',
+    encounter: 'none',
+    title: 'Preparing the adventure',
+    detail: '',
+    eventNumber: 0,
+    totalEvents: 0,
+    lastRoll: null,
+    ...previous,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  stepInfoBySession.set(sessionId, next);
+  sseManager.emit(sessionId, 'step_update', next);
+  return next;
+}
+
+/**
+ * Current step info for a session (used by GET /:sessionId/state).
+ */
+export function getStepInfo(sessionId: string): StepInfo | null {
+  return stepInfoBySession.get(sessionId) || null;
+}
 
 // Boss fight state (in-memory per session)
 const bossFights = new Map<string, {
@@ -26,6 +84,126 @@ const combatEncounters = new Map<string, {
   playerIndex: number;
   deadPlayers: Set<string>;
 }>();
+
+/**
+ * Resolve the character a player is actually playing.
+ *
+ * The player record is the source of truth once a character has been assigned,
+ * because that is where stat changes (HP loss, etc.) are persisted. The lore's
+ * suggestedCharacters list is only a template used as a fallback.
+ */
+function resolveCharacter(
+  state: GameState,
+  player: Player | undefined,
+  fallbackIndex = 0
+): Character | undefined {
+  if (player?.character?.stats) return player.character;
+
+  const suggested = state.worldLore.suggestedCharacters;
+  if (!suggested || suggested.length === 0) return undefined;
+
+  const byId = suggested.find((c) => c.id === player?.character?.id);
+  return byId || suggested[fallbackIndex % suggested.length];
+}
+
+/**
+ * A character at 0 HP is downed and cannot act.
+ *
+ * Persisted HP is the single source of truth here, rather than a parallel
+ * "dead players" set, so a downed hero stays downed across encounters instead
+ * of being asked to roll again in the next event.
+ */
+function isDowned(state: GameState, player: Player | undefined, index = 0): boolean {
+  if (!player) return true;
+  const character = resolveCharacter(state, player, index);
+  if (!character) return false;
+  return character.stats.hp <= 0;
+}
+
+/**
+ * Players who can still act, paired with their original roster index so
+ * character fallbacks stay stable.
+ */
+function livingParty(state: GameState, sessionPlayers: Player[]): { player: Player; index: number }[] {
+  return sessionPlayers
+    .map((player, index) => ({ player, index }))
+    .filter(({ player, index }) => !isDowned(state, player, index));
+}
+
+/**
+ * Apply stat deltas to players and persist them.
+ *
+ * Without this, HP changes were only ever broadcast in the SSE payload and the
+ * character sheet never actually changed. Returns the new stats per player so
+ * the outgoing event can carry authoritative values.
+ */async function applyStatChanges(
+  sessionId: string,
+  state: GameState,
+  statChanges: StatChange[]
+): Promise<Record<string, CharacterStats>> {
+  if (!statChanges || statChanges.length === 0) return {};
+
+  const sessionPlayers = await players.getSessionPlayers(sessionId);
+  const updated: Record<string, CharacterStats> = {};
+
+  // Group deltas by player so each player is written once.
+  const byPlayer = new Map<string, StatChange[]>();
+  for (const change of statChanges) {
+    if (!change.playerId) continue;
+    const list = byPlayer.get(change.playerId) || [];
+    list.push(change);
+    byPlayer.set(change.playerId, list);
+  }
+
+  for (const [playerId, changes] of byPlayer) {
+    const player = sessionPlayers.find((p) => p.playerId === playerId);
+    if (!player) continue;
+
+    const index = sessionPlayers.indexOf(player);
+    const baseCharacter = resolveCharacter(state, player, index);
+    if (!baseCharacter) continue;
+
+    // Deep-ish clone so we never mutate the shared lore template.
+    const character: Character = {
+      ...baseCharacter,
+      stats: { ...baseCharacter.stats },
+      statusEffects: [...(baseCharacter.statusEffects || [])],
+      inventory: [...(baseCharacter.inventory || [])],
+    };
+
+    for (const change of changes) {
+      const stat = change.stat;
+      const current = character.stats[stat] ?? 0;
+      let next = current + change.delta;
+
+      if (stat === 'hp') {
+        // HP is clamped to the character's own ceiling and floored at 0, so the
+        // -999 "downed" sentinel resolves to exactly 0 rather than a negative.
+        next = Math.max(0, Math.min(next, character.stats.maxHp));
+      } else if (stat === 'maxHp') {
+        next = Math.max(1, next);
+      } else {
+        next = Math.max(1, next);
+      }
+
+      character.stats[stat] = next;
+    }
+
+    // Write the whole character: the player may not have had one assigned yet,
+    // and a nested-path update would fail on a missing attribute.
+    await players.assignCharacter(sessionId, playerId, character);
+    updated[playerId] = character.stats;
+
+    console.log(
+      `[Stats] ${player.playerName} (${character.name}): ` +
+        changes.map((c) => `${c.stat}${c.delta >= 0 ? '+' : ''}${c.delta}`).join(' ') +
+        ` → HP ${character.stats.hp}/${character.stats.maxHp}`
+    );
+  }
+
+  return updated;
+}
+
 
 /**
  * Start the game loop for a session.
@@ -56,6 +234,16 @@ export async function startGameLoop(sessionId: string): Promise<void> {
 
   console.log(`[GameLoop] Starting game ${sessionId} (${session.totalEvents} events)`);
 
+  setStep(sessionId, {
+    phase: 'narrating',
+    encounter: 'none',
+    title: 'The Journey Begins',
+    detail: `The Dungeon Master is introducing ${state.worldLore.worldName}.`,
+    eventNumber: 0,
+    totalEvents: session.totalEvents,
+    lastRoll: null,
+  });
+
   // === JOURNEY SUMMARY (opening) ===
   const journeySummary = buildJourneySummary(state, sessionPlayers);
   sseManager.emit(sessionId, 'narrative', {
@@ -75,8 +263,9 @@ function buildJourneySummary(state: GameState, sessionPlayers: Player[]): string
   const lore = state.worldLore;
   let summary = `Welcome to ${lore.worldName}. ${lore.worldDescription}\n\n`;
   summary += `Your party:\n`;
-  for (const p of sessionPlayers) {
-    const char = lore.suggestedCharacters.find(c => c.id === p.character?.id) || lore.suggestedCharacters[0];
+  for (let i = 0; i < sessionPlayers.length; i++) {
+    const p = sessionPlayers[i];
+    const char = resolveCharacter(state, p, i);
     if (char) {
       summary += `• ${char.name} (${char.race} ${char.class}) — HP:${char.stats.hp} STR:${char.stats.str} DEX:${char.stats.dex}\n`;
     } else {
@@ -136,15 +325,41 @@ async function advanceToNextEvent(sessionId: string): Promise<void> {
     return;
   }
 
-  // Pick the player for this event (rotate)
+  // Pick the player for this event, rotating only among heroes still standing.
   const sessionPlayers = await players.getSessionPlayers(sessionId);
-  const playerIndex = (nextEventNumber - 1) % sessionPlayers.length;
-  const activePlayer = sessionPlayers[playerIndex];
+  const living = livingParty(state, sessionPlayers);
 
-  // Get their character
-  const character = state.worldLore.suggestedCharacters.find(
-    c => c.id === activePlayer?.character?.id
-  ) || state.worldLore.suggestedCharacters[playerIndex % state.worldLore.suggestedCharacters.length];
+  // Whole party downed: the campaign ends here rather than asking corpses to roll.
+  if (living.length === 0) {
+    await endGame(sessionId, 'wipe');
+    return;
+  }
+
+  const turn = living[(nextEventNumber - 1) % living.length];
+  const activePlayer = turn.player;
+  const playerIndex = turn.index;
+
+  // Get their live character (player record wins over the lore template)
+  const character = resolveCharacter(state, activePlayer, playerIndex);
+
+  setStep(sessionId, {
+    phase: 'narrating',
+    encounter: 'none',
+    title: eventOutline.title,
+    detail: 'The Dungeon Master is setting the scene...',
+    eventNumber: nextEventNumber,
+    totalEvents: updatedSession.totalEvents,
+    activePlayerId: activePlayer?.playerId,
+    activePlayerName: activePlayer?.playerName,
+    characterName: character?.name,
+    characterClass: character?.class,
+    characterStats: character?.stats || null,
+    diceType: undefined,
+    roundNumber: undefined,
+    enemyName: undefined,
+    enemyHp: undefined,
+    enemyMaxHp: undefined,
+  });
 
   // Generate DM narrative for this event — tied to the character
   await generateAndBroadcastNarrative(sessionId, state, nextEventNumber, activePlayer, character);
@@ -158,7 +373,7 @@ async function generateAndBroadcastNarrative(
   state: GameState,
   eventNumber: number,
   activePlayer: Player,
-  character: { name: string; class: string; stats: { hp: number; maxHp: number; str: number; dex: number; int: number; wis: number; cha: number; con: number } }
+  character: Character | undefined
 ): Promise<void> {
   const sessionPlayers = await players.getSessionPlayers(sessionId);
   const previousEvts = await gameEvents.getSessionEvents(sessionId);
@@ -206,8 +421,8 @@ async function generateAndBroadcastNarrative(
     text: dmResponse.narrative_text,
     eventNumber,
     title: eventOutline.title,
-    characterName: character.name,
-    characterClass: character.class,
+    characterName: character?.name,
+    characterClass: character?.class,
     playerName: activePlayer.playerName,
     isCombat: eventOutline.type === 'combat',
     enemyName: eventOutline.enemyName,
@@ -222,18 +437,39 @@ async function generateAndBroadcastNarrative(
 
   // Broadcast dice request tied to the character (single roll events)
   const diceType = dmResponse.dice_type || eventOutline.requiredDiceType || 'd20';
+  const reason = dmResponse.dice_reason || `${character?.name || activePlayer.playerName} must face this challenge!`;
+
+  setStep(sessionId, {
+    phase: 'awaiting_roll',
+    encounter: 'none',
+    title: eventOutline.title,
+    detail: reason,
+    eventNumber,
+    totalEvents: session.totalEvents,
+    activePlayerId: activePlayer.playerId,
+    activePlayerName: activePlayer.playerName,
+    characterName: character?.name,
+    characterClass: character?.class,
+    characterStats: character?.stats || null,
+    diceType,
+  });
+
   sseManager.emit(sessionId, 'dice_request', {
     targetPlayerId: activePlayer.playerId,
     targetPlayerName: activePlayer.playerName,
-    characterName: character.name,
-    characterClass: character.class,
-    characterStats: character.stats,
+    characterName: character?.name,
+    characterClass: character?.class,
+    characterStats: character?.stats || null,
     diceType,
-    reason: dmResponse.dice_reason || `${character.name} must face this challenge!`,
+    reason,
     attemptNumber: 1,
+    eventNumber,
+    totalEvents: session.totalEvents,
+    eventTitle: eventOutline.title,
+    difficulty: eventOutline.difficulty,
   });
 
-  console.log(`[GameLoop] Event ${eventNumber}: ${character.name} (${activePlayer.playerName}) rolls ${diceType}`);
+  console.log(`[GameLoop] Event ${eventNumber}: ${character?.name} (${activePlayer.playerName}) rolls ${diceType}`);
 }
 
 /**
@@ -261,6 +497,21 @@ async function startCombatEncounter(
 
   console.log(`[Combat] Starting encounter: ${enemyName} (HP: ${enemyHp}) at event ${eventNumber}`);
 
+  const session = await gameSessions.getGameSession(sessionId);
+  setStep(sessionId, {
+    phase: 'narrating',
+    encounter: 'combat',
+    title: `Combat: ${enemyName}`,
+    detail: `${enemyName} blocks the path (HP ${enemyHp}/${enemyHp}).`,
+    eventNumber,
+    totalEvents: session?.totalEvents ?? 0,
+    roundNumber: 1,
+    enemyName,
+    enemyHp,
+    enemyMaxHp: enemyHp,
+    lastRoll: null,
+  });
+
   // Request first player's roll
   await requestCombatRoll(sessionId);
 }
@@ -275,27 +526,51 @@ async function requestCombatRoll(sessionId: string): Promise<void> {
   const sessionPlayers = await players.getSessionPlayers(sessionId);
   const state = await gameState.getGameState(sessionId);
   if (!state) return;
+  const session = await gameSessions.getGameSession(sessionId);
 
-  // Find next alive player
+  // Find the next hero still standing. HP is authoritative; the per-encounter
+  // set only catches deaths that happened during this fight.
+  const isOut = (idx: number) =>
+    combat.deadPlayers.has(sessionPlayers[idx]?.playerId) || isDowned(state, sessionPlayers[idx], idx);
+
   let attempts = 0;
-  while (combat.deadPlayers.has(sessionPlayers[combat.playerIndex]?.playerId) && attempts < sessionPlayers.length) {
+  while (isOut(combat.playerIndex) && attempts < sessionPlayers.length) {
     combat.playerIndex = (combat.playerIndex + 1) % sessionPlayers.length;
     attempts++;
   }
 
-  // All players dead? End combat as loss
-  if (attempts >= sessionPlayers.length || combat.deadPlayers.size >= sessionPlayers.length) {
+  // All players down? End combat as loss
+  if (isOut(combat.playerIndex)) {
     await endCombatEncounter(sessionId, false);
     return;
   }
 
   const activePlayer = sessionPlayers[combat.playerIndex];
-  const character = state.worldLore.suggestedCharacters.find(
-    c => c.id === activePlayer?.character?.id
-  ) || state.worldLore.suggestedCharacters[combat.playerIndex % state.worldLore.suggestedCharacters.length];
+  const character = resolveCharacter(state, activePlayer, combat.playerIndex);
 
   await gameState.setWaitingForDice(sessionId, true);
   await gameState.updateTurn(sessionId, activePlayer.playerId, combat.roundNumber);
+
+  const reason = `${character?.name || activePlayer.playerName} attacks ${combat.enemyName}!`;
+
+  setStep(sessionId, {
+    phase: 'awaiting_roll',
+    encounter: 'combat',
+    title: `Combat: ${combat.enemyName}`,
+    detail: reason,
+    eventNumber: combat.eventNumber,
+    totalEvents: session?.totalEvents ?? 0,
+    activePlayerId: activePlayer.playerId,
+    activePlayerName: activePlayer.playerName,
+    characterName: character?.name,
+    characterClass: character?.class,
+    characterStats: character?.stats || null,
+    diceType: 'd20',
+    roundNumber: combat.roundNumber,
+    enemyName: combat.enemyName,
+    enemyHp: combat.enemyHp,
+    enemyMaxHp: combat.enemyMaxHp,
+  });
 
   sseManager.emit(sessionId, 'dice_request', {
     targetPlayerId: activePlayer.playerId,
@@ -304,9 +579,12 @@ async function requestCombatRoll(sessionId: string): Promise<void> {
     characterClass: character?.class || 'Adventurer',
     characterStats: character?.stats || null,
     diceType: 'd20',
-    reason: `${character?.name || activePlayer.playerName} attacks ${combat.enemyName}! (Enemy HP: ${combat.enemyHp}/${combat.enemyMaxHp})`,
+    reason: `${reason} (Enemy HP: ${combat.enemyHp}/${combat.enemyMaxHp})`,
     attemptNumber: combat.roundNumber,
+    eventNumber: combat.eventNumber,
+    totalEvents: session?.totalEvents ?? 0,
     isCombat: true,
+    roundNumber: combat.roundNumber,
     enemyHp: combat.enemyHp,
     enemyMaxHp: combat.enemyMaxHp,
     enemyName: combat.enemyName,
@@ -320,10 +598,13 @@ async function handleCombatDiceResult(
   sessionId: string,
   diceResult: DiceResultInput,
   targetPlayer: Player | undefined,
-  character: { name: string; class: string; stats: { hp: number; maxHp: number; str: number; dex: number; int: number; wis: number; cha: number; con: number } } | undefined
+  character: Character | undefined
 ): Promise<void> {
   const combat = combatEncounters.get(sessionId);
   if (!combat) return;
+
+  const state = await gameState.getGameState(sessionId);
+  const session = await gameSessions.getGameSession(sessionId);
 
   const rollValue = diceResult.rollValue;
   const maxValue = parseInt(diceResult.diceType.replace('d', ''));
@@ -362,6 +643,16 @@ async function handleCombatDiceResult(
     if (targetPlayer) combat.deadPlayers.add(targetPlayer.playerId);
   }
 
+  // Persist the stat changes so the character sheet actually updates.
+  const updatedStats = state ? await applyStatChanges(sessionId, state, statChanges) : {};
+  const liveStats = (targetPlayer && updatedStats[targetPlayer.playerId]) || character?.stats || null;
+
+  // A character reduced to 0 HP is out of the fight, however it happened.
+  if (liveStats && liveStats.hp <= 0 && targetPlayer) {
+    combat.deadPlayers.add(targetPlayer.playerId);
+    playerDied = true;
+  }
+
   // Apply damage to enemy
   combat.enemyHp = Math.max(0, combat.enemyHp - damage);
 
@@ -371,7 +662,7 @@ async function handleCombatDiceResult(
     playerName: targetPlayer?.playerName || 'Unknown',
     characterName: charName,
     characterClass: character?.class || 'Adventurer',
-    characterStats: character?.stats || null,
+    characterStats: liveStats,
     diceType: diceResult.diceType,
     rollValue,
     maxValue,
@@ -380,13 +671,38 @@ async function handleCombatDiceResult(
     reason: `Attack ${combat.enemyName}`,
     difficulty: 'medium',
     statChanges,
+    updatedStats,
     isCombat: true,
+    roundNumber: combat.roundNumber,
     enemyHp: combat.enemyHp,
     enemyMaxHp: combat.enemyMaxHp,
     enemyName: combat.enemyName,
     playerDied,
     isCrit: rollValue >= maxValue * 0.9,
     critDamage: rollValue >= maxValue * 0.9 ? damage : undefined,
+  });
+
+  setStep(sessionId, {
+    phase: 'resolving',
+    encounter: 'combat',
+    title: `Combat: ${combat.enemyName}`,
+    detail: outcome,
+    eventNumber: combat.eventNumber,
+    totalEvents: session?.totalEvents ?? 0,
+    characterName: charName,
+    characterClass: character?.class,
+    characterStats: liveStats,
+    roundNumber: combat.roundNumber,
+    enemyName: combat.enemyName,
+    enemyHp: combat.enemyHp,
+    enemyMaxHp: combat.enemyMaxHp,
+    lastRoll: {
+      playerName: targetPlayer?.playerName || 'Unknown',
+      characterName: charName,
+      rollValue,
+      maxValue,
+      outcome,
+    },
   });
 
   console.log(`[Combat] ${charName}: rolled ${rollValue} → ${damage} dmg → ${combat.enemyName} HP: ${combat.enemyHp}/${combat.enemyMaxHp}`);
@@ -440,6 +756,21 @@ async function endCombatEncounter(sessionId: string, playersWon: boolean): Promi
   });
 
   combatEncounters.delete(sessionId);
+
+  setStep(sessionId, {
+    phase: 'narrating',
+    encounter: 'none',
+    title: playersWon ? `Victory: ${combat.enemyName} defeated` : `Fallen to ${combat.enemyName}`,
+    detail: playersWon
+      ? 'The party presses on to the next challenge.'
+      : 'The remaining party steels themselves and moves on.',
+    eventNumber: combat.eventNumber,
+    totalEvents: session.totalEvents,
+    roundNumber: undefined,
+    enemyName: undefined,
+    enemyHp: undefined,
+    enemyMaxHp: undefined,
+  });
 
   // Continue to next event (game doesn't end on mid-combat death, only boss)
   setTimeout(() => advanceToNextEvent(sessionId), 2000);
@@ -495,6 +826,20 @@ async function startBossFight(sessionId: string, state: GameState): Promise<void
     bossMaxHp: bossHp,
   });
 
+  setStep(sessionId, {
+    phase: 'narrating',
+    encounter: 'boss',
+    title: `Boss Fight: ${bossName}`,
+    detail: `${bossName} emerges from the darkness. Every hero must fight.`,
+    eventNumber,
+    totalEvents: session.totalEvents,
+    roundNumber: 1,
+    enemyName: bossName,
+    enemyHp: bossHp,
+    enemyMaxHp: bossHp,
+    lastRoll: null,
+  });
+
   // Request first player's roll
   await requestBossRoll(sessionId);
 }
@@ -509,27 +854,50 @@ async function requestBossRoll(sessionId: string): Promise<void> {
   const sessionPlayers = await players.getSessionPlayers(sessionId);
   const state = await gameState.getGameState(sessionId);
   if (!state) return;
+  const session = await gameSessions.getGameSession(sessionId);
 
-  // Find next alive player
+  // Find the next hero still standing (persisted HP is authoritative).
+  const isOut = (idx: number) =>
+    boss.deadPlayers.has(sessionPlayers[idx]?.playerId) || isDowned(state, sessionPlayers[idx], idx);
+
   let attempts = 0;
-  while (boss.deadPlayers.has(sessionPlayers[boss.playerIndex]?.playerId) && attempts < sessionPlayers.length) {
+  while (isOut(boss.playerIndex) && attempts < sessionPlayers.length) {
     boss.playerIndex = (boss.playerIndex + 1) % sessionPlayers.length;
     attempts++;
   }
 
-  // All players dead?
-  if (attempts >= sessionPlayers.length || boss.deadPlayers.size >= sessionPlayers.length) {
+  // All players down?
+  if (isOut(boss.playerIndex)) {
     await endBossFight(sessionId, false);
     return;
   }
 
   const activePlayer = sessionPlayers[boss.playerIndex];
-  const character = state.worldLore.suggestedCharacters.find(
-    c => c.id === activePlayer?.character?.id
-  ) || state.worldLore.suggestedCharacters[boss.playerIndex % state.worldLore.suggestedCharacters.length];
+  const character = resolveCharacter(state, activePlayer, boss.playerIndex);
 
   await gameState.setWaitingForDice(sessionId, true);
   await gameState.updateTurn(sessionId, activePlayer.playerId, boss.roundNumber);
+
+  const reason = `${character?.name || activePlayer.playerName} attacks ${boss.bossName}!`;
+
+  setStep(sessionId, {
+    phase: 'awaiting_roll',
+    encounter: 'boss',
+    title: `Boss Fight: ${boss.bossName}`,
+    detail: reason,
+    eventNumber: session?.currentEvent ?? 0,
+    totalEvents: session?.totalEvents ?? 0,
+    activePlayerId: activePlayer.playerId,
+    activePlayerName: activePlayer.playerName,
+    characterName: character?.name,
+    characterClass: character?.class,
+    characterStats: character?.stats || null,
+    diceType: 'd20',
+    roundNumber: boss.roundNumber,
+    enemyName: boss.bossName,
+    enemyHp: boss.bossHp,
+    enemyMaxHp: boss.bossMaxHp,
+  });
 
   sseManager.emit(sessionId, 'dice_request', {
     targetPlayerId: activePlayer.playerId,
@@ -538,11 +906,17 @@ async function requestBossRoll(sessionId: string): Promise<void> {
     characterClass: character?.class || 'Adventurer',
     characterStats: character?.stats || null,
     diceType: 'd20',
-    reason: `${character?.name || activePlayer.playerName} attacks ${boss.bossName}! (Boss HP: ${boss.bossHp}/${boss.bossMaxHp})`,
+    reason: `${reason} (Boss HP: ${boss.bossHp}/${boss.bossMaxHp})`,
     attemptNumber: boss.roundNumber,
+    eventNumber: session?.currentEvent ?? 0,
+    totalEvents: session?.totalEvents ?? 0,
     isBossFight: true,
+    roundNumber: boss.roundNumber,
+    enemyName: boss.bossName,
     bossHp: boss.bossHp,
     bossMaxHp: boss.bossMaxHp,
+    enemyHp: boss.bossHp,
+    enemyMaxHp: boss.bossMaxHp,
   });
 }
 
@@ -574,10 +948,12 @@ export async function handleDiceResult(
     (p) => p.playerId === state.currentTurnPlayerId
   );
 
-  // Get character info
-  const character = state.worldLore.suggestedCharacters.find(
-    c => c.id === targetPlayer?.character?.id
-  ) || state.worldLore.suggestedCharacters[0];
+  // Get the player's live character (persisted stats win over the lore template)
+  const character = resolveCharacter(
+    state,
+    targetPlayer,
+    targetPlayer ? sessionPlayers.indexOf(targetPlayer) : 0
+  );
 
   // === COMBAT ENCOUNTER HANDLING ===
   if (combatEncounters.has(sessionId)) {
@@ -600,6 +976,10 @@ export async function handleDiceResult(
   // Calculate stat changes based on roll
   const statChanges = calculateStatChanges(diceResult.rollValue, diceResult.diceType, targetPlayer?.playerId || '');
 
+  // Persist them so the character sheet actually reflects the outcome.
+  const updatedStats = await applyStatChanges(sessionId, state, statChanges);
+  const liveStats = (targetPlayer && updatedStats[targetPlayer.playerId]) || character?.stats || null;
+
   // Complete the event with outcome and stat changes
   await gameEvents.completeEvent(sessionId, eventNumber, {
     outcome,
@@ -612,7 +992,7 @@ export async function handleDiceResult(
     playerName: targetPlayer?.playerName || 'Unknown',
     characterName: character?.name || 'Unknown',
     characterClass: character?.class || 'Adventurer',
-    characterStats: character?.stats || null,
+    characterStats: liveStats,
     diceType: diceResult.diceType,
     rollValue: diceResult.rollValue,
     maxValue: parseInt(diceResult.diceType.replace('d', '')),
@@ -621,6 +1001,31 @@ export async function handleDiceResult(
     reason: eventOutline?.title || 'Fate decides...',
     difficulty: eventOutline?.difficulty || 'medium',
     statChanges,
+    updatedStats,
+    eventNumber,
+    totalEvents: session.totalEvents,
+  });
+
+  setStep(sessionId, {
+    phase: 'resolving',
+    encounter: 'none',
+    title: eventOutline?.title || `Event ${eventNumber}`,
+    detail: outcome,
+    eventNumber,
+    totalEvents: session.totalEvents,
+    activePlayerId: targetPlayer?.playerId,
+    activePlayerName: targetPlayer?.playerName,
+    characterName: character?.name,
+    characterClass: character?.class,
+    characterStats: liveStats,
+    diceType: diceResult.diceType,
+    lastRoll: {
+      playerName: targetPlayer?.playerName || 'Unknown',
+      characterName: character?.name || 'Unknown',
+      rollValue: diceResult.rollValue,
+      maxValue: parseInt(diceResult.diceType.replace('d', '')),
+      outcome,
+    },
   });
 
   console.log(`[GameLoop] ${character?.name}: rolled ${diceResult.rollValue} → ${outcome} | stat changes: ${JSON.stringify(statChanges)}`);
@@ -645,10 +1050,13 @@ async function handleBossDiceResult(
   sessionId: string,
   diceResult: DiceResultInput,
   targetPlayer: Player | undefined,
-  character: { name: string; class: string; stats: { hp: number; maxHp: number; str: number; dex: number; int: number; wis: number; cha: number; con: number } } | undefined
+  character: Character | undefined
 ): Promise<void> {
   const boss = bossFights.get(sessionId);
   if (!boss) return;
+
+  const state = await gameState.getGameState(sessionId);
+  const session = await gameSessions.getGameSession(sessionId);
 
   const rollValue = diceResult.rollValue;
   const maxValue = parseInt(diceResult.diceType.replace('d', ''));
@@ -687,6 +1095,15 @@ async function handleBossDiceResult(
     if (targetPlayer) boss.deadPlayers.add(targetPlayer.playerId);
   }
 
+  // Persist the stat changes so the character sheet actually updates.
+  const updatedStats = state ? await applyStatChanges(sessionId, state, statChanges) : {};
+  const liveStats = (targetPlayer && updatedStats[targetPlayer.playerId]) || character?.stats || null;
+
+  if (liveStats && liveStats.hp <= 0 && targetPlayer) {
+    boss.deadPlayers.add(targetPlayer.playerId);
+    playerDied = true;
+  }
+
   // Apply damage to boss
   boss.bossHp = Math.max(0, boss.bossHp - damage);
 
@@ -696,7 +1113,7 @@ async function handleBossDiceResult(
     playerName: targetPlayer?.playerName || 'Unknown',
     characterName: charName,
     characterClass: character?.class || 'Adventurer',
-    characterStats: character?.stats || null,
+    characterStats: liveStats,
     diceType: diceResult.diceType,
     rollValue,
     maxValue,
@@ -705,10 +1122,38 @@ async function handleBossDiceResult(
     reason: `Attack ${boss.bossName}`,
     difficulty: 'hard',
     statChanges,
+    updatedStats,
     isBossFight: true,
+    roundNumber: boss.roundNumber,
+    enemyName: boss.bossName,
     bossHp: boss.bossHp,
     bossMaxHp: boss.bossMaxHp,
+    enemyHp: boss.bossHp,
+    enemyMaxHp: boss.bossMaxHp,
     playerDied,
+  });
+
+  setStep(sessionId, {
+    phase: 'resolving',
+    encounter: 'boss',
+    title: `Boss Fight: ${boss.bossName}`,
+    detail: outcome,
+    eventNumber: session?.currentEvent ?? 0,
+    totalEvents: session?.totalEvents ?? 0,
+    characterName: charName,
+    characterClass: character?.class,
+    characterStats: liveStats,
+    roundNumber: boss.roundNumber,
+    enemyName: boss.bossName,
+    enemyHp: boss.bossHp,
+    enemyMaxHp: boss.bossMaxHp,
+    lastRoll: {
+      playerName: targetPlayer?.playerName || 'Unknown',
+      characterName: charName,
+      rollValue,
+      maxValue,
+      outcome,
+    },
   });
 
   console.log(`[BossFight] ${charName}: rolled ${rollValue} → ${damage} dmg → Boss HP: ${boss.bossHp}/${boss.bossMaxHp}`);
@@ -761,8 +1206,8 @@ async function endBossFight(sessionId: string, playersWon: boolean): Promise<voi
     bossMaxHp: boss?.bossMaxHp || 100,
   });
 
-  // End the game
-  setTimeout(() => endGame(sessionId), 2000);
+  // End the game — a boss-fight loss means the party was wiped.
+  setTimeout(() => endGame(sessionId, playersWon ? 'completed' : 'wipe'), 2000);
 }
 
 /**
@@ -818,19 +1263,25 @@ function interpretDiceResult(rollValue: number, diceType: string, difficulty: st
 /**
  * End the game with a journey recap.
  */
-async function endGame(sessionId: string): Promise<void> {
+async function endGame(sessionId: string, outcome: 'completed' | 'wipe' = 'completed'): Promise<void> {
   activeGames.delete(sessionId);
   await gameSessions.updateSessionStatus(sessionId, 'completed');
+
+  // A downed party should not leave a half-finished fight running.
+  combatEncounters.delete(sessionId);
+  bossFights.delete(sessionId);
 
   const sessionPlayers = await players.getSessionPlayers(sessionId);
   const allEvents = await gameEvents.getSessionEvents(sessionId);
   const state = await gameState.getGameState(sessionId);
 
   // Build journey recap
-  let recap = '📖 JOURNEY RECAP\n\n';
+  let recap = outcome === 'wipe'
+    ? '💀 THE PARTY HAS FALLEN\n\nEvery hero was downed before the journey could be completed.\n\n📖 JOURNEY RECAP\n\n'
+    : '📖 JOURNEY RECAP\n\n';
   for (const evt of allEvents) {
     const player = sessionPlayers.find(p => p.playerId === evt.targetPlayerId);
-    const char = state?.worldLore.suggestedCharacters.find(c => c.id === player?.character?.id);
+    const char = player?.character || state?.worldLore.suggestedCharacters.find(c => c.id === player?.character?.id);
     const charName = char?.name || player?.playerName || 'Hero';
     recap += `Event ${evt.eventNumber}: ${evt.title}\n`;
     recap += `  ${charName} rolled ${evt.diceResult || '?'} → ${evt.outcome || 'Unknown'}\n`;
@@ -844,12 +1295,13 @@ async function endGame(sessionId: string): Promise<void> {
   sseManager.emit(sessionId, 'narrative', {
     text: recap,
     eventNumber: 999,
-    title: '📖 Journey Recap',
+    title: outcome === 'wipe' ? '💀 The Party Has Fallen' : '📖 Journey Recap',
   });
 
   // Broadcast game over
   sseManager.emit(sessionId, 'game_over', {
     summary: recap,
+    outcome,
     totalTurns: allEvents.length,
     playerStats: sessionPlayers.map((p) => ({
       playerId: p.playerId,
@@ -858,7 +1310,21 @@ async function endGame(sessionId: string): Promise<void> {
     })),
   });
 
-  console.log(`[GameLoop] Game ${sessionId} completed!`);
+  setStep(sessionId, {
+    phase: 'complete',
+    encounter: 'none',
+    title: outcome === 'wipe' ? 'The Party Has Fallen' : 'Adventure Complete',
+    detail: outcome === 'wipe'
+      ? `Every hero was downed after ${allEvents.length} events.`
+      : `The journey ends after ${allEvents.length} events.`,
+    totalEvents: allEvents.length,
+    roundNumber: undefined,
+    enemyName: undefined,
+    enemyHp: undefined,
+    enemyMaxHp: undefined,
+  });
+
+  console.log(`[GameLoop] Game ${sessionId} ended (${outcome})`);
 }
 
 /**

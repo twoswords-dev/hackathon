@@ -1,9 +1,38 @@
 import { Router, Request, Response } from 'express';
 import { getAssetUrl, generateImage } from '../agents/imageGenerator';
 import { generateCharacterSVG, generateCritActionSVG, generateHitActionSVG } from '../agents/svgCharacterGenerator';
+import { normalizeRace, normalizeClass, statsFor } from '../game/characterPresets';
 import { gameState } from '../db';
 
 const router = Router();
+
+/**
+ * GET /api/assets/preview/character?race=Elf&class=Mage&name=Lyra
+ * Pixel art for a race/class combination with no session required, so the
+ * character creator can preview art before the game exists.
+ */
+router.get('/preview/character', (req: Request, res: Response) => {
+  try {
+    const race = normalizeRace(req.query.race);
+    const characterClass = normalizeClass(req.query.class);
+    const rawName = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+    const name = (rawName || `${race} ${characterClass}`).substring(0, 24);
+
+    const svg = generateCharacterSVG({
+      name,
+      class: characterClass,
+      race,
+      stats: statsFor(race, characterClass),
+    });
+
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(svg);
+  } catch (err) {
+    console.error('[Assets] Error generating preview SVG:', err);
+    res.status(500).json({ error: 'Failed to generate preview' });
+  }
+});
 
 /**
  * GET /api/assets/character/:sessionId/:characterId/svg

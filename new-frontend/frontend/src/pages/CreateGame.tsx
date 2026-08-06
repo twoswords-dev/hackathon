@@ -1,6 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createGame } from '../api/gameApi';
+import {
+  createGame,
+  getCharacterOptions,
+  characterPreviewUrl,
+  type CharacterOptions,
+  type CharacterStats,
+} from '../api/gameApi';
 
 const SOURCE_PRESETS = [
   { label: '🧙 Lord of the Rings', value: 'Lord of the Rings' },
@@ -11,6 +17,20 @@ const SOURCE_PRESETS = [
   { label: '✨ Custom...', value: '' },
 ];
 
+const CLASS_ICONS: Record<string, string> = {
+  Warrior: '🗡️',
+  Mage: '🔮',
+  Rogue: '🏹',
+  Cleric: '✨',
+};
+
+const RACE_ICONS: Record<string, string> = {
+  Human: '🧑',
+  Elf: '🧝',
+  Dwarf: '🧔',
+  Halfling: '🧒',
+};
+
 export default function CreateGame() {
   const navigate = useNavigate();
   const [sourceMaterial, setSourceMaterial] = useState('');
@@ -20,6 +40,29 @@ export default function CreateGame() {
   const [hostName, setHostName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Character creation
+  const [options, setOptions] = useState<CharacterOptions | null>(null);
+  const [charName, setCharName] = useState('');
+  const [charRace, setCharRace] = useState('Human');
+  const [charClass, setCharClass] = useState('Warrior');
+
+  useEffect(() => {
+    getCharacterOptions()
+      .then(setOptions)
+      .catch(() => {
+        // Fall back to the known-supported sets if the lookup fails.
+        setOptions({
+          races: ['Human', 'Elf', 'Dwarf', 'Halfling'],
+          classes: ['Warrior', 'Mage', 'Rogue', 'Cleric'],
+          statsByCombo: [],
+        });
+      });
+  }, []);
+
+  // Stat line the server will produce for the current race/class pick
+  const previewStats: CharacterStats | null =
+    options?.statsByCombo.find((c) => c.race === charRace && c.class === charClass)?.stats ?? null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,6 +87,11 @@ export default function CreateGame() {
         gameLength,
         playerCount,
         hostName: hostName.trim(),
+        customCharacter: {
+          name: charName.trim() || hostName.trim(),
+          race: charRace,
+          class: charClass,
+        },
       });
 
       sessionStorage.setItem(`player_${result.sessionId}`, JSON.stringify({
@@ -139,6 +187,89 @@ export default function CreateGame() {
         </div>
 
         {error && <div className="form-error">{error}</div>}
+
+        {/* ---- Character creation ---- */}
+        <div className="form-section char-create">
+          <label className="form-label">Your Character</label>
+          <p className="form-hint">
+            Build the hero you will play. Pixel art and stats update as you choose.
+          </p>
+
+          <div className="char-create__body">
+            <div className="char-create__preview">
+              <img
+                className="pixel-portrait pixel-portrait--large"
+                src={characterPreviewUrl({ race: charRace, class: charClass, name: charName || hostName })}
+                alt={`Pixel art preview of a ${charRace} ${charClass}`}
+                width={128}
+                height={128}
+              />
+              <strong className="char-create__preview-name">
+                {charName || hostName || 'Unnamed Hero'}
+              </strong>
+              <span className="char-create__preview-sub">{charRace} {charClass}</span>
+
+              {previewStats && (
+                <div className="char-create__stats">
+                  <span className="char-create__hp">❤️ {previewStats.hp} HP</span>
+                  <div className="char-create__stat-grid">
+                    <span>STR {previewStats.str}</span>
+                    <span>DEX {previewStats.dex}</span>
+                    <span>INT {previewStats.int}</span>
+                    <span>WIS {previewStats.wis}</span>
+                    <span>CHA {previewStats.cha}</span>
+                    <span>CON {previewStats.con}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="char-create__fields">
+              <label className="form-label form-label--sub" htmlFor="char-name">
+                Character Name
+              </label>
+              <input
+                id="char-name"
+                type="text"
+                placeholder={hostName ? `e.g. ${hostName} the Bold` : 'Name your hero...'}
+                value={charName}
+                onChange={(e) => setCharName(e.target.value)}
+                className="form-input"
+                maxLength={24}
+              />
+
+              <span className="form-label form-label--sub" id="race-label">Race</span>
+              <div className="chip-grid" role="group" aria-labelledby="race-label">
+                {(options?.races ?? []).map((race) => (
+                  <button
+                    key={race}
+                    type="button"
+                    className={`chip ${charRace === race ? 'chip--active' : ''}`}
+                    onClick={() => setCharRace(race)}
+                    aria-pressed={charRace === race}
+                  >
+                    <span aria-hidden="true">{RACE_ICONS[race] ?? '🎭'}</span> {race}
+                  </button>
+                ))}
+              </div>
+
+              <span className="form-label form-label--sub" id="class-label">Class</span>
+              <div className="chip-grid" role="group" aria-labelledby="class-label">
+                {(options?.classes ?? []).map((cls) => (
+                  <button
+                    key={cls}
+                    type="button"
+                    className={`chip ${charClass === cls ? 'chip--active' : ''}`}
+                    onClick={() => setCharClass(cls)}
+                    aria-pressed={charClass === cls}
+                  >
+                    <span aria-hidden="true">{CLASS_ICONS[cls] ?? '⚔️'}</span> {cls}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
 
         <button type="submit" className="btn-primary btn-large" disabled={loading}>
           {loading ? '🎲 Generating World...' : '✨ Create Campaign'}

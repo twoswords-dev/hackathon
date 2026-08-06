@@ -124,46 +124,7 @@
 
 
 /*
-  ========================================
-  NEW: NEXT STEP AGENT OUTPUT BOX
-  ========================================
+  The old free-text "next step" box was replaced by StepPanel
+  (components/StepPanel.tsx + StepPanel.css), which renders structured,
+  event-driven state instead of a single overwritable string.
 */
-
-.dm-next-step {
-  position: relative;
-  width: 90%;
-  
-  /* THIS IS THE MAGIC TRICK: 
-     It pushes this box to the top and everything else to the bottom */
-  margin-bottom: auto; 
-  
-  background: rgba(68, 16, 81, 0.75); /* Matches speech box but slightly more transparent */
-  border: 1px solid rgba(212, 175, 55, 0.55);
-  border-radius: 14px;
-  padding: 1rem;
-  z-index: 2;
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-}
-
-.dm-next-step__title {
-  margin: 0 0 0.75rem 0;
-  color: rgba(212, 175, 55, 1); /* Solid Gold */
-  font-family: "IM Fell English", serif;
-  font-size: 1.25rem;
-  text-align: center;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  border-bottom: 1px solid rgba(212, 175, 55, 0.25);
-  padding-bottom: 0.5rem;
-}
-
-.dm-next-step__content p {
-  margin: 0;
-  color: #e6dced; /* Soft readable off-white/purple */
-  font-family: sans-serif; /* Cleaner font for reading longer agent outputs */
-  font-size: 0.95rem;
-  line-height: 1.5;
-  text-align: center;
-  font-style: italic;
-  opacity: 0.8;
-}

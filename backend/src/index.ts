@@ -34,6 +34,7 @@ app.get('/api', (_req, res) => {
     endpoints: {
       health: 'GET /api/health',
       events: 'GET /api/events/:sessionId',
+      eventsPoll: 'GET /api/events/:sessionId/poll?since=<seq>',
       game: {
         create: 'POST /api/game/create',
         join: 'POST /api/game/:sessionId/join',
@@ -52,6 +53,38 @@ app.use('/api/game', gameRoutes);
 app.use('/api/assets', assetRoutes);
 app.use('/api/dice', diceRoutes);
 app.use('/api/chat', chatRoutes);
+
+/**
+ * Polling fallback for the SSE stream.
+ *
+ * API Gateway (and other buffering proxies) cannot stream `text/event-stream`:
+ * it holds the response and returns 503 at its 30s integration timeout. Clients
+ * that detect a failed stream poll this endpoint instead.
+ *
+ * GET /api/events/:sessionId/poll?since=<seq>&playerId=xxx&clientId=xxx
+ * `since` omitted or negative -> no backlog, returns the current sequence only.
+ */
+app.get('/api/events/:sessionId/poll', (req, res) => {
+  const { sessionId } = req.params;
+  const playerId = req.query.playerId as string | undefined;
+  const clientId = (req.query.clientId as string | undefined) || uuidv4();
+
+  const parsedSince = Number.parseInt(req.query.since as string, 10);
+  const since = Number.isFinite(parsedSince) ? parsedSince : -1;
+
+  sseManager.touchPollClient(sessionId, clientId, playerId);
+
+  const { lastSeq, events } = sseManager.getEventsSince(sessionId, since, playerId);
+
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    clientId,
+    lastSeq,
+    events,
+    connectedClients: sseManager.getSessionClientCount(sessionId),
+    connectedPlayers: sseManager.getConnectedPlayers(sessionId),
+  });
+});
 
 /**
  * SSE stream for real-time game events.
