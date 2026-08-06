@@ -36,6 +36,8 @@ export default function GameView() {
   // DM speech state (drives DungeonMaster component)
   const [isDmSpeaking, setIsDmSpeaking] = useState(false);
   const [dmSpeechText, setDmSpeechText] = useState('');
+  const [dmAudioUrl, setDmAudioUrl] = useState<string | undefined>(undefined);
+  const [nextStepText, setNextStepText] = useState('Awaiting the Dungeon Master...');
 
   // Authoritative current-step info, pushed by the backend as `step_update`.
   const [step, setStep] = useState<GameStepInfo | null>(null);
@@ -166,6 +168,17 @@ export default function GameView() {
         break;
       }
       case 'narrative': {
+        const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string; audioUrl?: string };
+        const entry: NarrativeEntry = {
+          text: data.text,
+          eventNumber: data.eventNumber,
+          title: data.title,
+          timestamp: event.timestamp,
+          diceResult: data.diceResult ?? null,
+          diceType: data.diceType ?? null,
+          outcome: data.outcome ?? null,
+        };
+        setNarratives((prev) => [...prev, entry]);
         const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string };
         setDiceRequest(null);
         setLastDiceResult(null);
@@ -174,6 +187,7 @@ export default function GameView() {
 
         // Trigger DM speech
         setDmSpeechText(data.text);
+        setDmAudioUrl(data.audioUrl);
         setIsDmSpeaking(true);
         setIsDmThinking(false);
 
@@ -400,6 +414,8 @@ export default function GameView() {
           isSpeaking={isDmSpeaking}
           speechText={dmSpeechText}
           onSpeechComplete={handleSpeechComplete}
+          nextStepText={nextStepText}
+          audioUrl={dmAudioUrl}
           step={step}
           isMyTurn={isMyTurn}
           connected={connected}

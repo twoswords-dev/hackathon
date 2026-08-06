@@ -31,6 +31,7 @@ export interface NarrativeEventData {
   text: string;
   eventNumber: number;
   title?: string;
+  audioUrl?: string;
 }
 
 export interface DiceRequestEventData {
