@@ -1,0 +1,47 @@
+.context-panel {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgb(85, 8, 84);
+    border: 1px solid rgba(212,175,55,.4);
+    border-radius: 14px;
+}
+
+.context-panel h3 {
+    margin: 0 0 .75rem;
+    text-align: center;
+    color: #f5e7b2;
+    font-family: "Cinzel", serif;
+    font-size: 1rem;
+}
+
+.context-card {
+    min-height: 120px;
+    padding: 1rem;
+    border-radius: 12px;
+    background: rgba(0,0,0,.22);
+    color: white;
+    line-height: 1.5;
+    transition: transform .35s ease;
+}
+
+.context-controls {
+    margin-top: .8rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.context-controls button {
+    background: var(--gold);
+    color: rgb(60,5,60);
+    border: none;
+    border-radius: 8px;
+    padding: .4rem .8rem;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.context-controls button:disabled {
+    opacity: .4;
+    cursor: default;
+}

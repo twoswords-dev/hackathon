@@ -30,11 +30,10 @@ export default function VideoScreen({
 
   return (
     <section className="video-screen">
+      <ContextPanel steps={gameSteps} />
       <header className="video-screen__header">
         <h2>🎲 Dice</h2>
       </header>
-
-      <ContextPanel steps={gameSteps} />
 
       {/* Idle state — no request, no result */}
       {!diceRequest && !diceResult && (
