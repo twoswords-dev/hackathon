@@ -1,5 +1,5 @@
 import { invokeClaudeModel, MODELS } from './bedrockClient';
-import { GameState, GameEvent, Player, DiceType, ActionRequired } from '../types/game';
+import { GameState, GameEvent, Player, DiceType, ActionRequired, SUPPORTED_DICE, normalizeDiceType, parseDiceType } from '../types/game';
 
 const DM_SYSTEM_PROMPT = `You are an AI Dungeon Master for a D&D game. You narrate events, describe scenes, create tension, and drive the story forward.
 
@@ -10,18 +10,21 @@ You receive the current game state and must generate the next narrative beat. Yo
 
 Your response MUST be valid JSON with this exact structure:
 {
-  "narrative_text": "string - KEEP THIS UNDER 100 CHARACTERS. Be extremely brief.",
+  "narrative_text": "string - 2-3 short sentences, 200-300 characters. Vivid but tight.",
   "action_required": "dice_roll" | "choice" | "none",
   "target_player_id": "string - player ID who needs to act (required if action_required != none)",
-  "dice_type": "d4" | "d6" | "d8" | "d10" | "d12" | "d20" (required if action_required == dice_roll),
+  "dice_type": "d4" | "d6" | "d8" | "d10" | "d12" | "d20" | "d100" (required if action_required == dice_roll),
   "dice_reason": "string - brief explanation of what the roll is for",
   "next_turn_player_id": "string - who acts next after this resolves"
 }
 
 Rules:
-- CRITICAL: narrative_text MUST be under 100 characters total. One short sentence max.
+- narrative_text MUST be 2-3 short sentences, roughly 200-300 characters (hard ceiling 350).
+- Use the space to set the scene, then name the stake the roll is about. No filler.
 - Match the tone and themes of the source material
 - Harder events should require higher dice (d20 for hard, d12 for medium, d6-d8 for easy)
+- dice_type MUST be exactly one of: d4, d6, d8, d10, d12, d20, d100. Never invent another die.
+- Vary the die across events so the party rolls more than just d20; match it to the challenge.
 - Rotate between players fairly
 - If this is the final event, make it feel like a grand finale`;
 
@@ -77,7 +80,7 @@ export async function generateNarrative(params: {
   const recentHistory = previousEvents.slice(-3).map((e) => ({
     title: e.title,
     outcome: e.outcome,
-    narrative: e.narrative?.substring(0, 200),
+    narrative: e.narrative?.substring(0, 300),
   }));
 
   const userMessage = `
@@ -99,7 +102,7 @@ ${recentHistory.length > 0 ? JSON.stringify(recentHistory, null, 2) : 'None - th
 
 ${currentEvent?.diceResult ? `LAST DICE RESULT: ${currentEvent.diceResult} (${currentEvent.diceType})` : ''}
 
-Write a SHORT narrative (under 100 chars) focused on the active character BY NAME. They are about to face a challenge and roll dice. Reference their abilities.`;
+Write a narrative of 2-3 short sentences (200-300 chars) focused on the active character BY NAME. Set the scene, then make clear what they are about to attempt. Reference their abilities.`;
 
   console.log(`[DM Agent] Generating narrative for event ${currentEventNumber}/${totalEvents}...`);
 
@@ -107,7 +110,7 @@ Write a SHORT narrative (under 100 chars) focused on the active character BY NAM
     modelId: MODELS.dungeonMaster,
     systemPrompt: DM_SYSTEM_PROMPT,
     userMessage,
-    maxTokens: 512,
+    maxTokens: 768,
     temperature: 0.8,
   });
 
@@ -138,6 +141,25 @@ Write a SHORT narrative (under 100 chars) focused on the active character BY NAM
     dmResponse.next_turn_player_id = playerIds[Math.floor(Math.random() * playerIds.length)];
   }
 
-  console.log(`[DM Agent] Generated: action=${dmResponse.action_required}, target=${dmResponse.target_player_id?.substring(0, 8)}`);
+  // Align the requested die with what the virtual roller can actually offer.
+  // The model occasionally returns things like "D20", "d3" or "20"; anything
+  // outside SUPPORTED_DICE is coerced to the default rather than trusted.
+  if (dmResponse.action_required === 'dice_roll') {
+    const requested = dmResponse.dice_type;
+    const valid = parseDiceType(requested);
+    if (!valid) {
+      if (requested !== undefined) {
+        console.warn(
+          `[DM Agent] Unsupported dice_type "${requested}" — falling back to ${normalizeDiceType(requested)}. ` +
+            `Supported: ${SUPPORTED_DICE.join(', ')}`
+        );
+      }
+      dmResponse.dice_type = normalizeDiceType(requested);
+    } else {
+      dmResponse.dice_type = valid;
+    }
+  }
+
+  console.log(`[DM Agent] Generated: action=${dmResponse.action_required}, dice=${dmResponse.dice_type ?? 'none'}, target=${dmResponse.target_player_id?.substring(0, 8)}`);
   return dmResponse;
 }

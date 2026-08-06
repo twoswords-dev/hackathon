@@ -56,6 +56,7 @@ export interface Player {
 export interface LoreSummary {
   worldName: string;
   worldDescription: string;
+  adventureSummary?: string;
   locations: { id: string; name: string; description: string }[];
   factions: { id: string; name: string; description: string }[];
   suggestedCharacters: Character[];
@@ -272,6 +273,18 @@ export async function rollVirtualDice(sessionId: string, diceType: string): Prom
     method: 'POST',
     body: JSON.stringify({ diceType }),
   });
+}
+
+/**
+ * Dice the engine supports, mirroring SUPPORTED_DICE in the backend.
+ * The DM's requested die is always one of these.
+ */
+export const SUPPORTED_DICE = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100'] as const;
+
+export type SupportedDie = typeof SUPPORTED_DICE[number];
+
+export async function getDiceOptions(): Promise<{ supportedDice: string[]; defaultDice: string }> {
+  return request('/game/dice-options');
 }
 
 export async function getGameState(sessionId: string): Promise<GameLoopState> {

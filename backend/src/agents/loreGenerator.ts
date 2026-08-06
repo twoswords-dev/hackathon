@@ -1,16 +1,17 @@
 import { invokeClaudeModel, MODELS } from './bedrockClient';
-import { WorldLore, GameLength, GAME_LENGTH_EVENTS, Character, DiceType } from '../types/game';
+import { WorldLore, GameLength, GAME_LENGTH_EVENTS, Character, DiceType, normalizeDiceType } from '../types/game';
 import { v4 as uuidv4 } from 'uuid';
 
 const LORE_SYSTEM_PROMPT = `You are a world-building AI for a Dungeons & Dragons game engine. Your job is to create game worlds based on source material provided by the player.
 
-IMPORTANT: Keep ALL text fields very short (under 100 characters each) for testing purposes.
+IMPORTANT: Keep ALL text fields short. Most fields are capped below; respect the caps.
 
 You must output ONLY valid JSON (no markdown, no explanation text) matching this exact schema:
 
 {
   "worldName": "string - creative name (max 30 chars)",
-  "worldDescription": "string - 1 sentence max, under 100 chars",
+  "worldDescription": "string - 1-2 sentences, under 180 chars",
+  "adventureSummary": "string - 3-4 sentences (250-400 chars) summarising the whole campaign arc: the premise, the threat, what the party must do, and how it ends. Second person, addressed to the party.",
   "sourceMaterial": "string - the original source material reference",
   "locations": [
     {
@@ -33,7 +34,7 @@ You must output ONLY valid JSON (no markdown, no explanation text) matching this
     {
       "eventNumber": number (starting at 1),
       "title": "string - max 30 chars",
-      "description": "string - max 80 chars",
+      "description": "string - 1-2 sentences, max 160 chars",
       "locationId": "string - reference to a location id",
       "difficulty": "easy" | "medium" | "hard",
       "requiredDiceType": "d4" | "d6" | "d8" | "d10" | "d12" | "d20",
@@ -80,7 +81,8 @@ Rules:
 - Create 3-4 locations on an 8x8 grid
 - Create 2 factions
 - Generate 4 suggested characters with varied classes
-- ALL text fields must be very short (under 100 chars) - this is for testing
+- ALL text fields must respect the character caps noted in the schema above
+- adventureSummary is required: it is read aloud to the party before the first event
 - Stats should be balanced but varied per class
 - Make 30-40% of events "combat" type with enemyName and enemyHp. The rest should be "narrative" type.
 - Combat enemyHp: easy=20-30, medium=30-50, hard=50-80
@@ -144,8 +146,7 @@ Make it epic, immersive, and fun!`;
  */
 function validateAndFixLore(lore: WorldLore, expectedEvents: number, playerCount: number): WorldLore {
   // Ensure IDs are set
-  if (!lore.locations) lore.locations = [];
-  for (const loc of lore.locations) {
+  if (!lore.locations) lore.locations = [];  for (const loc of lore.locations) {
     if (!loc.id) loc.id = uuidv4();
   }
 
@@ -181,6 +182,8 @@ function validateAndFixLore(lore: WorldLore, expectedEvents: number, playerCount
   lore.eventOutlines.forEach((event, i) => {
     event.eventNumber = i + 1;
     if (!event.type) event.type = 'narrative';
+    // Keep the die within the set the virtual roller offers.
+    event.requiredDiceType = normalizeDiceType(event.requiredDiceType);
     if (event.type === 'combat') {
       if (!event.enemyName) event.enemyName = 'Dark Creature';
       if (!event.enemyHp) {
@@ -227,6 +230,20 @@ function validateAndFixLore(lore: WorldLore, expectedEvents: number, playerCount
     if (!char.statusEffects) char.statusEffects = [];
     if (!char.inventory) char.inventory = [];
     if (!char.portraitAssetId) char.portraitAssetId = '';
+  }
+
+  // The opening summary is read to the party before event 1, so it must always
+  // exist. If the model omitted it, synthesise one from the lore we do have.
+  if (!lore.adventureSummary || lore.adventureSummary.trim().length === 0) {
+    const firstEvent = lore.eventOutlines[0];
+    const lastEvent = lore.eventOutlines[lore.eventOutlines.length - 1];
+    const parts = [
+      lore.worldDescription,
+      firstEvent ? `Your journey begins with "${firstEvent.title}".` : '',
+      lastEvent && lastEvent !== firstEvent ? `It builds toward "${lastEvent.title}" before the final confrontation.` : '',
+      `${lore.eventOutlines.length} trials stand between you and the end of this tale.`,
+    ];
+    lore.adventureSummary = parts.filter(Boolean).join(' ');
   }
 
   return lore;

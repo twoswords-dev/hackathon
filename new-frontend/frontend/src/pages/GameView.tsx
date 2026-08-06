@@ -36,6 +36,8 @@ export default function GameView() {
   // DM speech state (drives DungeonMaster component)
   const [isDmSpeaking, setIsDmSpeaking] = useState(false);
   const [dmSpeechText, setDmSpeechText] = useState('');
+  // Polly-synthesized narration for the current beat, sent with the narrative.
+  const [dmAudioUrl, setDmAudioUrl] = useState<string | null>(null);
 
   // Authoritative current-step info, pushed by the backend as `step_update`.
   const [step, setStep] = useState<GameStepInfo | null>(null);
@@ -166,7 +168,7 @@ export default function GameView() {
         break;
       }
       case 'narrative': {
-        const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string };
+        const data = event.data as { text: string; eventNumber: number; title: string; audioUrl?: string; diceResult?: number; diceType?: string; outcome?: string };
         setDiceRequest(null);
         setLastDiceResult(null);
         setPendingDiceType(null);
@@ -174,6 +176,7 @@ export default function GameView() {
 
         // Trigger DM speech
         setDmSpeechText(data.text);
+        setDmAudioUrl(data.audioUrl ?? null);
         setIsDmSpeaking(true);
         setIsDmThinking(false);
 
@@ -231,10 +234,11 @@ export default function GameView() {
         }]);
         setIsDmThinking(true);
 
-        // Clear dice request after a delay so the result is visible
+        // Clear dice request after a delay so the result is visible.
+        // Kept in step with the engine's DICE_RESULT_DISPLAY_MS pacing.
         setTimeout(() => {
           setDiceRequest(null);
-        }, 2000);
+        }, 5000);
         break;
       }
       case 'game_over': {
@@ -243,6 +247,7 @@ export default function GameView() {
         setDiceRequest(null);
         setPendingDiceType(null);
         setDmSpeechText(data.summary);
+        setDmAudioUrl(null);
         setIsDmSpeaking(true);
 
         setMessages((prev) => [...prev, {
@@ -399,6 +404,7 @@ export default function GameView() {
         <DungeonMaster
           isSpeaking={isDmSpeaking}
           speechText={dmSpeechText}
+          audioUrl={dmAudioUrl}
           onSpeechComplete={handleSpeechComplete}
           step={step}
           isMyTurn={isMyTurn}
@@ -421,19 +427,32 @@ export default function GameView() {
         {/* Character Stats Panel */}
         {activeCharacter && (
           <div className="character-stats-panel">
-            {/* Pixel art portrait */}
-            <div className="stats-panel__portrait">
+            {/* Portrait and identity share one row to keep the panel short,
+                leaving more vertical space for the chat log below. */}
+            <div className="stats-panel__identity">
               <img
                 className="pixel-portrait"
                 src={characterPortraitUrl(sessionId, activeCharacter)}
                 alt={`Pixel art portrait of ${activeCharacter.name}, ${activeCharacter.race} ${activeCharacter.class}`}
-                width={96}
-                height={96}
+                width={56}
+                height={56}
               />
-            </div>
+              <div className="stats-panel__meta">
+                <h3 className="stats-panel__name">{activeCharacter.name}</h3>
+                <span className="stats-panel__class">{activeCharacter.race} {activeCharacter.class}</span>
 
-            <h3 className="stats-panel__name">{activeCharacter.name}</h3>
-            <span className="stats-panel__class">{activeCharacter.race} {activeCharacter.class}</span>
+                {/* HP Bar */}
+                <div className="stats-panel__hp">
+                  <div className="hp-bar">
+                    <div
+                      className={`hp-bar__fill ${hpRatio <= 0.25 ? 'hp-bar__fill--critical' : hpRatio <= 0.5 ? 'hp-bar__fill--low' : ''}`}
+                      style={{ width: `${Math.max(0, Math.min(100, hpRatio * 100))}%` }}
+                    />
+                  </div>
+                  <span className="hp-bar__text">❤️ {activeCharacter.stats.hp}/{activeCharacter.stats.maxHp}</span>
+                </div>
+              </div>
+            </div>
 
             {isDowned && (
               <span className="stats-panel__downed" role="status">
@@ -441,18 +460,7 @@ export default function GameView() {
               </span>
             )}
 
-            {/* HP Bar */}
-            <div className="stats-panel__hp">
-              <div className="hp-bar">
-                <div
-                  className={`hp-bar__fill ${hpRatio <= 0.25 ? 'hp-bar__fill--critical' : hpRatio <= 0.5 ? 'hp-bar__fill--low' : ''}`}
-                  style={{ width: `${Math.max(0, Math.min(100, hpRatio * 100))}%` }}
-                />
-              </div>
-              <span className="hp-bar__text">❤️ {activeCharacter.stats.hp}/{activeCharacter.stats.maxHp}</span>
-            </div>
-
-            {/* Core Stats */}
+            {/* Core Stats — single row of six */}
             <div className="stats-panel__grid">
               <div className="stat-pill"><span className="stat-label">STR</span><span className="stat-value">{activeCharacter.stats.str}</span></div>
               <div className="stat-pill"><span className="stat-label">DEX</span><span className="stat-value">{activeCharacter.stats.dex}</span></div>

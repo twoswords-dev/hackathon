@@ -1,10 +1,30 @@
 import { gameSessions, players, gameEvents, gameState } from '../db';
 import { generateNarrative, DMResponse } from '../agents/dungeonMaster';
+import { synthesizeAndCache } from '../agents/pollyNarrator';
 import { sseManager } from '../sse';
-import { DiceResultInput, GameState, Player, StatChange, Character, CharacterStats } from '../types/game';
+import { DiceResultInput, GameState, Player, StatChange, Character, CharacterStats, DiceType, normalizeDiceType, diceFaces } from '../types/game';
 
 // Track active game loops
 const activeGames = new Map<string, { running: boolean }>();
+
+/**
+ * Pacing delays (ms).
+ *
+ * These control how long a dice result stays on screen: the frontend keeps the
+ * result panel up until the next `narrative` or `dice_request` arrives, so the
+ * engine's delay before moving on *is* the display duration.
+ */
+const INTRO_READ_MS = 8000;        // time to read the opening adventure summary
+const DICE_RESULT_DISPLAY_MS = 7000; // result of a single-roll event stays up
+const COMBAT_ROLL_DISPLAY_MS = 5000; // result of a combat/boss round stays up
+const ENCOUNTER_END_DISPLAY_MS = 4000; // victory/defeat beat before next event
+
+/**
+ * The finale is always a d20 fight — the widest spread, so crits and crit-fails
+ * are both on the table. Named rather than inlined so it is clearly deliberate
+ * and not a leftover hardcoded default like combat rounds used to have.
+ */
+const BOSS_DICE_TYPE: DiceType = 'd20';
 
 /**
  * Live, human-readable description of what the game is currently waiting on.
@@ -33,6 +53,59 @@ export interface StepInfo {
 }
 
 const stepInfoBySession = new Map<string, StepInfo>();
+
+/**
+ * Strip decoration that sounds wrong when read aloud.
+ *
+ * Narratives carry emoji, bullet glyphs and compact stat lines ("HP:71 STR:12")
+ * that Polly would either skip or read character by character, so they are
+ * removed before synthesis. The on-screen text keeps them.
+ */
+function toSpeechText(text: string): string {
+  return text
+    // Arrow notation used in recaps. Must run before the symbol strip below,
+    // whose range covers U+2190-U+21FF and would otherwise delete the arrow.
+    .replace(/→/g, ' then ')
+    // Drop emoji / pictographs / dingbats.
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu, ' ')
+    // Bullet and list glyphs become sentence breaks.
+    .replace(/[•·▪]/g, '. ')
+    // Stat shorthand reads badly; drop those runs entirely.
+    .replace(/\b(HP|STR|DEX|INT|WIS|CHA|CON|MAXHP)\s*:\s*-?\d+/gi, '')
+    // Em/en dashes left dangling after the strips above add nothing spoken.
+    .replace(/\s[—–]\s*$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,!?])/g, '$1')
+    .replace(/(\.\s*){2,}/g, '. ')
+    .trim();
+}
+
+/**
+ * Emit a `narrative` SSE event, attaching synthesized speech when available.
+ *
+ * Synthesis is awaited so the text and its audio reach clients together, which
+ * lets the UI pace the on-screen reveal against the real clip duration. A TTS
+ * failure is non-fatal: the narrative still goes out, just silently.
+ */
+async function emitNarrative(
+  sessionId: string,
+  eventNumber: number,
+  data: Record<string, unknown> & { text: string },
+  speechTextOverride?: string
+): Promise<void> {
+  let audioUrl: string | undefined;
+
+  try {
+    const speech = toSpeechText(speechTextOverride ?? data.text);
+    if (speech.length > 0) {
+      audioUrl = await synthesizeAndCache(sessionId, eventNumber, speech);
+    }
+  } catch (err) {
+    console.error('[GameLoop] TTS synthesis failed; emitting narrative without audio:', err);
+  }
+
+  sseManager.emit(sessionId, 'narrative', { ...data, eventNumber, audioUrl });
+}
 
 /**
  * Merge a partial update into the session's step info and broadcast it so every
@@ -64,6 +137,21 @@ export function getStepInfo(sessionId: string): StepInfo | null {
   return stepInfoBySession.get(sessionId) || null;
 }
 
+/**
+ * The die the engine is actually waiting on right now, or null if it is not
+ * waiting for a roll.
+ *
+ * The persisted event row is not reliable for this: it stores the die chosen
+ * when the event was created, while combat and boss rounds request their own
+ * die each round. Step info is updated on every request, so it is the single
+ * authoritative answer for normal events, combat and boss fights alike.
+ */
+export function getRequestedDiceType(sessionId: string): DiceType | null {
+  const step = stepInfoBySession.get(sessionId);
+  if (!step || step.phase !== 'awaiting_roll') return null;
+  return step.diceType ? normalizeDiceType(step.diceType) : null;
+}
+
 // Boss fight state (in-memory per session)
 const bossFights = new Map<string, {
   bossHp: number;
@@ -80,6 +168,7 @@ const combatEncounters = new Map<string, {
   enemyMaxHp: number;
   enemyName: string;
   eventNumber: number;
+  diceType: DiceType;
   roundNumber: number;
   playerIndex: number;
   deadPlayers: Set<string>;
@@ -246,14 +335,16 @@ export async function startGameLoop(sessionId: string): Promise<void> {
 
   // === JOURNEY SUMMARY (opening) ===
   const journeySummary = buildJourneySummary(state, sessionPlayers);
-  sseManager.emit(sessionId, 'narrative', {
+  // Narrate only the prose intro; the party roster and road-ahead list are
+  // reference material that does not read well aloud.
+  const journeyNarration = buildJourneyNarration(state);
+  await emitNarrative(sessionId, 0, {
     text: journeySummary,
-    eventNumber: 0,
     title: '📖 The Journey Begins',
-  });
+  }, journeyNarration);
 
-  // Brief pause then start first event
-  setTimeout(() => advanceToNextEvent(sessionId), 2000);
+  // Give players time to read the opening summary before the first event
+  setTimeout(() => advanceToNextEvent(sessionId), INTRO_READ_MS);
 }
 
 /**
@@ -262,6 +353,13 @@ export async function startGameLoop(sessionId: string): Promise<void> {
 function buildJourneySummary(state: GameState, sessionPlayers: Player[]): string {
   const lore = state.worldLore;
   let summary = `Welcome to ${lore.worldName}. ${lore.worldDescription}\n\n`;
+
+  // Opening synopsis of the whole campaign arc, so players know what they signed
+  // up for before the first roll.
+  if (lore.adventureSummary) {
+    summary += `${lore.adventureSummary}\n\n`;
+  }
+
   summary += `Your party:\n`;
   for (let i = 0; i < sessionPlayers.length; i++) {
     const p = sessionPlayers[i];
@@ -272,8 +370,37 @@ function buildJourneySummary(state: GameState, sessionPlayers: Player[]): string
       summary += `• ${p.playerName} — ready for adventure\n`;
     }
   }
+
+  // Preview the road ahead by title so the arc is legible from turn one.
+  const previewCount = 3;
+  const preview = lore.eventOutlines.slice(0, previewCount);
+  if (preview.length > 0) {
+    summary += `\nThe road ahead:\n`;
+    for (const evt of preview) {
+      summary += `${evt.eventNumber}. ${evt.title}${evt.type === 'combat' ? ' ⚔️' : ''}\n`;
+    }
+    if (lore.eventOutlines.length > previewCount) {
+      summary += `…and ${lore.eventOutlines.length - previewCount} more.\n`;
+    }
+  }
+
   summary += `\n${lore.eventOutlines.length} challenges await. The final battle will test you all.`;
   return summary;
+}
+
+/**
+ * Spoken form of the opening: world framing plus the campaign synopsis.
+ */
+function buildJourneyNarration(state: GameState): string {
+  const lore = state.worldLore;
+  return [
+    `Welcome to ${lore.worldName}.`,
+    lore.worldDescription,
+    lore.adventureSummary,
+    `${lore.eventOutlines.length} challenges await. The final battle will test you all.`,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 /**
@@ -406,7 +533,7 @@ async function generateAndBroadcastNarrative(
     narrative: dmResponse.narrative_text,
     actionRequired: 'dice_roll',
     targetPlayerId: activePlayer.playerId,
-    diceType: dmResponse.dice_type || eventOutline.requiredDiceType || 'd20',
+    diceType: normalizeDiceType(dmResponse.dice_type || eventOutline.requiredDiceType),
   });
 
   // Update game state
@@ -417,9 +544,8 @@ async function generateAndBroadcastNarrative(
   await gameState.updateTurn(sessionId, activePlayer.playerId, state.turnNumber + 1);
 
   // Broadcast narrative with character info
-  sseManager.emit(sessionId, 'narrative', {
+  await emitNarrative(sessionId, eventNumber, {
     text: dmResponse.narrative_text,
-    eventNumber,
     title: eventOutline.title,
     characterName: character?.name,
     characterClass: character?.class,
@@ -436,7 +562,7 @@ async function generateAndBroadcastNarrative(
   }
 
   // Broadcast dice request tied to the character (single roll events)
-  const diceType = dmResponse.dice_type || eventOutline.requiredDiceType || 'd20';
+  const diceType = normalizeDiceType(dmResponse.dice_type || eventOutline.requiredDiceType);
   const reason = dmResponse.dice_reason || `${character?.name || activePlayer.playerName} must face this challenge!`;
 
   setStep(sessionId, {
@@ -478,18 +604,22 @@ async function generateAndBroadcastNarrative(
 async function startCombatEncounter(
   sessionId: string,
   eventNumber: number,
-  eventOutline: { enemyName?: string; enemyHp?: number; title: string },
+  eventOutline: { enemyName?: string; enemyHp?: number; title: string; requiredDiceType?: DiceType },
   sessionPlayers: Player[],
   state: GameState
 ): Promise<void> {
   const enemyHp = eventOutline.enemyHp || sessionPlayers.length * 30;
   const enemyName = eventOutline.enemyName || 'Enemy';
+  // Combat used to force d20 every round; honour the event's own die so the
+  // party actually rolls the variety the lore asked for.
+  const diceType = normalizeDiceType(eventOutline.requiredDiceType);
 
   combatEncounters.set(sessionId, {
     enemyHp,
     enemyMaxHp: enemyHp,
     enemyName,
     eventNumber,
+    diceType,
     roundNumber: 1,
     playerIndex: 0,
     deadPlayers: new Set(),
@@ -565,7 +695,7 @@ async function requestCombatRoll(sessionId: string): Promise<void> {
     characterName: character?.name,
     characterClass: character?.class,
     characterStats: character?.stats || null,
-    diceType: 'd20',
+    diceType: combat.diceType,
     roundNumber: combat.roundNumber,
     enemyName: combat.enemyName,
     enemyHp: combat.enemyHp,
@@ -578,7 +708,7 @@ async function requestCombatRoll(sessionId: string): Promise<void> {
     characterName: character?.name || activePlayer.playerName,
     characterClass: character?.class || 'Adventurer',
     characterStats: character?.stats || null,
-    diceType: 'd20',
+    diceType: combat.diceType,
     reason: `${reason} (Enemy HP: ${combat.enemyHp}/${combat.enemyMaxHp})`,
     attemptNumber: combat.roundNumber,
     eventNumber: combat.eventNumber,
@@ -607,7 +737,7 @@ async function handleCombatDiceResult(
   const session = await gameSessions.getGameSession(sessionId);
 
   const rollValue = diceResult.rollValue;
-  const maxValue = parseInt(diceResult.diceType.replace('d', ''));
+  const maxValue = diceFaces(diceResult.diceType);
   const charName = character?.name || targetPlayer?.playerName || 'Hero';
 
   let damage = 0;
@@ -722,8 +852,8 @@ async function handleCombatDiceResult(
     combat.roundNumber++;
   }
 
-  // Request next roll after brief pause
-  setTimeout(() => requestCombatRoll(sessionId), 1500);
+  // Hold this round's result on screen, then request the next roll
+  setTimeout(() => requestCombatRoll(sessionId), COMBAT_ROLL_DISPLAY_MS);
 }
 
 /**
@@ -744,11 +874,10 @@ async function endCombatEncounter(sessionId: string, playersWon: boolean): Promi
   });
 
   // Broadcast combat end narrative
-  sseManager.emit(sessionId, 'narrative', {
+  await emitNarrative(sessionId, combat.eventNumber, {
     text: playersWon
       ? `⚔️ ${combat.enemyName} falls! The heroes are victorious! (${combat.enemyMaxHp} HP dealt)`
       : `💀 A hero has fallen to ${combat.enemyName}. The remaining party steels themselves and moves on.`,
-    eventNumber: combat.eventNumber,
     title: playersWon ? `⚔️ Victory: ${combat.enemyName} Defeated` : `💀 Fallen to ${combat.enemyName}`,
     isCombat: true,
     enemyHp: 0,
@@ -773,7 +902,7 @@ async function endCombatEncounter(sessionId: string, playersWon: boolean): Promi
   });
 
   // Continue to next event (game doesn't end on mid-combat death, only boss)
-  setTimeout(() => advanceToNextEvent(sessionId), 2000);
+  setTimeout(() => advanceToNextEvent(sessionId), ENCOUNTER_END_DISPLAY_MS);
 }
 
 /**
@@ -807,7 +936,7 @@ async function startBossFight(sessionId: string, state: GameState): Promise<void
     narrative: `${bossName} appears! HP: ${bossHp}/${bossHp}. All heroes must fight!`,
     actionRequired: 'dice_roll',
     targetPlayerId: sessionPlayers[0]?.playerId,
-    diceType: 'd20',
+    diceType: BOSS_DICE_TYPE,
   });
 
   // Broadcast counter update
@@ -817,9 +946,8 @@ async function startBossFight(sessionId: string, state: GameState): Promise<void
   });
 
   // Broadcast boss narrative
-  sseManager.emit(sessionId, 'narrative', {
+  await emitNarrative(sessionId, eventNumber, {
     text: `🔥 ${bossName} emerges from the darkness! HP: ${bossHp}/${bossHp}. Each hero must strike — roll well or suffer the consequences!`,
-    eventNumber,
     title: `⚔️ BOSS FIGHT: ${bossName}`,
     isBossFight: true,
     bossHp,
@@ -892,7 +1020,7 @@ async function requestBossRoll(sessionId: string): Promise<void> {
     characterName: character?.name,
     characterClass: character?.class,
     characterStats: character?.stats || null,
-    diceType: 'd20',
+    diceType: BOSS_DICE_TYPE,
     roundNumber: boss.roundNumber,
     enemyName: boss.bossName,
     enemyHp: boss.bossHp,
@@ -905,7 +1033,7 @@ async function requestBossRoll(sessionId: string): Promise<void> {
     characterName: character?.name || activePlayer.playerName,
     characterClass: character?.class || 'Adventurer',
     characterStats: character?.stats || null,
-    diceType: 'd20',
+    diceType: BOSS_DICE_TYPE,
     reason: `${reason} (Boss HP: ${boss.bossHp}/${boss.bossMaxHp})`,
     attemptNumber: boss.roundNumber,
     eventNumber: session?.currentEvent ?? 0,
@@ -995,7 +1123,7 @@ export async function handleDiceResult(
     characterStats: liveStats,
     diceType: diceResult.diceType,
     rollValue: diceResult.rollValue,
-    maxValue: parseInt(diceResult.diceType.replace('d', '')),
+    maxValue: diceFaces(diceResult.diceType),
     source: diceResult.source,
     outcome,
     reason: eventOutline?.title || 'Fate decides...',
@@ -1023,7 +1151,7 @@ export async function handleDiceResult(
       playerName: targetPlayer?.playerName || 'Unknown',
       characterName: character?.name || 'Unknown',
       rollValue: diceResult.rollValue,
-      maxValue: parseInt(diceResult.diceType.replace('d', '')),
+      maxValue: diceFaces(diceResult.diceType),
       outcome,
     },
   });
@@ -1039,8 +1167,8 @@ export async function handleDiceResult(
     totalEvents: session.totalEvents,
   });
 
-  // Advance to next event after brief pause
-  setTimeout(() => advanceToNextEvent(sessionId), 2000);
+  // Hold the result on screen, then advance
+  setTimeout(() => advanceToNextEvent(sessionId), DICE_RESULT_DISPLAY_MS);
 }
 
 /**
@@ -1059,7 +1187,7 @@ async function handleBossDiceResult(
   const session = await gameSessions.getGameSession(sessionId);
 
   const rollValue = diceResult.rollValue;
-  const maxValue = parseInt(diceResult.diceType.replace('d', ''));
+  const maxValue = diceFaces(diceResult.diceType);
   const charName = character?.name || targetPlayer?.playerName || 'Hero';
 
   let damage = 0;
@@ -1173,8 +1301,8 @@ async function handleBossDiceResult(
     boss.roundNumber++;
   }
 
-  // Request next roll after brief pause
-  setTimeout(() => requestBossRoll(sessionId), 1500);
+  // Hold this round's result on screen, then request the next roll
+  setTimeout(() => requestBossRoll(sessionId), COMBAT_ROLL_DISPLAY_MS);
 }
 
 /**
@@ -1195,11 +1323,10 @@ async function endBossFight(sessionId: string, playersWon: boolean): Promise<voi
   bossFights.delete(sessionId);
 
   // Emit boss defeat/victory
-  sseManager.emit(sessionId, 'narrative', {
+  await emitNarrative(sessionId, session.currentEvent, {
     text: playersWon
       ? `🏆 ${boss?.bossName || 'The Boss'} falls! The heroes are victorious!`
       : `💀 All heroes have fallen. ${boss?.bossName || 'The Boss'} reigns supreme.`,
-    eventNumber: session.currentEvent,
     title: playersWon ? '🏆 VICTORY!' : '💀 DEFEAT',
     isBossFight: true,
     bossHp: 0,
@@ -1207,14 +1334,14 @@ async function endBossFight(sessionId: string, playersWon: boolean): Promise<voi
   });
 
   // End the game — a boss-fight loss means the party was wiped.
-  setTimeout(() => endGame(sessionId, playersWon ? 'completed' : 'wipe'), 2000);
+  setTimeout(() => endGame(sessionId, playersWon ? 'completed' : 'wipe'), ENCOUNTER_END_DISPLAY_MS);
 }
 
 /**
  * Calculate stat changes based on dice roll.
  */
 function calculateStatChanges(rollValue: number, diceType: string, playerId: string): StatChange[] {
-  const maxValue = parseInt(diceType.replace('d', ''));
+  const maxValue = diceFaces(diceType);
   const ratio = rollValue / maxValue;
 
   if (ratio >= 0.9) {
@@ -1242,7 +1369,7 @@ function calculateStatChanges(rollValue: number, diceType: string, playerId: str
  * Interpret a dice result based on the roll value and difficulty.
  */
 function interpretDiceResult(rollValue: number, diceType: string, difficulty: string): string {
-  const maxValue = parseInt(diceType.replace('d', ''));
+  const maxValue = diceFaces(diceType);
   const ratio = rollValue / maxValue;
 
   const thresholds = {
@@ -1291,12 +1418,15 @@ async function endGame(sessionId: string, outcome: 'completed' | 'wipe' = 'compl
     recap += '\n';
   }
 
-  // Broadcast recap as narrative
-  sseManager.emit(sessionId, 'narrative', {
+  // Broadcast recap as narrative. The recap body is a stat table, so narrate a
+  // short spoken closing instead of reading every row aloud.
+  const spokenClosing = outcome === 'wipe'
+    ? `The party has fallen. Every hero was downed after ${allEvents.length} events. The tale ends here.`
+    : `The journey is complete. Your party survived ${allEvents.length} events. The tale of this adventure ends here.`;
+  await emitNarrative(sessionId, 999, {
     text: recap,
-    eventNumber: 999,
     title: outcome === 'wipe' ? '💀 The Party Has Fallen' : '📖 Journey Recap',
-  });
+  }, spokenClosing);
 
   // Broadcast game over
   sseManager.emit(sessionId, 'game_over', {

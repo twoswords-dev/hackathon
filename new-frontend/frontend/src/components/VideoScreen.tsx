@@ -1,6 +1,12 @@
 import type { DiceRequestData, DiceResultData } from "../api/gameApi";
+import { SUPPORTED_DICE } from "../api/gameApi";
 import "./VideoScreen.css";
 import ContextPanel from "./ContextPanel";
+
+/** Face count per die, used to render the tray labels. */
+const DIE_FACES: Record<string, number> = {
+  d4: 4, d6: 6, d8: 8, d10: 10, d12: 12, d20: 20, d100: 100,
+};
 
 interface VideoScreenProps {
   diceRequest?: DiceRequestData | null;
@@ -49,6 +55,34 @@ export default function VideoScreen({
           <div className="request-dice-type">{diceRequest.diceType.toUpperCase()}</div>
           <p className="request-character">{diceRequest.characterName}</p>
           <p className="request-reason">{diceRequest.reason}</p>
+
+          {/* Full dice tray. Only the die the DM asked for is rollable — the
+              others are shown so the available set is visible, but rolling a
+              different die would not match the challenge's difficulty. */}
+          <div className="dice-tray" role="group" aria-label="Available dice">
+            {SUPPORTED_DICE.map((die) => {
+              const isRequested = die === diceRequest.diceType.toLowerCase();
+              const rollable = isRequested && canRoll;
+              return (
+                <button
+                  key={die}
+                  type="button"
+                  className={`dice-chip${isRequested ? " dice-chip--requested" : ""}`}
+                  onClick={rollable ? handleVirtualRoll : undefined}
+                  disabled={!rollable}
+                  aria-current={isRequested ? "true" : undefined}
+                  title={
+                    isRequested
+                      ? `Roll ${die.toUpperCase()} (1-${DIE_FACES[die]})`
+                      : `The Dungeon Master asked for ${diceRequest.diceType.toUpperCase()}, not ${die.toUpperCase()}`
+                  }
+                >
+                  <span className="dice-chip__label">{die.toUpperCase()}</span>
+                  <span className="dice-chip__faces">1-{DIE_FACES[die]}</span>
+                </button>
+              );
+            })}
+          </div>
 
           {canRoll && (
             <button

@@ -93,9 +93,25 @@
 }
 
 
+/* Shown only when the browser's autoplay policy blocked the narration */
+.dm-speech__audio-enable {
+  margin-top: .5rem;
+  padding: .3rem .6rem;
+  font-family: "IM Fell English", serif;
+  font-size: .8rem;
+  color: #f8e7b5;
+  background: rgba(212, 175, 55, .18);
+  border: 1px solid rgba(212, 175, 55, .6);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.dm-speech__audio-enable:hover {
+  background: rgba(212, 175, 55, .3);
+}
+
 .dm-speech p {
   margin: 0;
-
   color: #f8e7b5;
 
   font-family: "IM Fell English", serif;

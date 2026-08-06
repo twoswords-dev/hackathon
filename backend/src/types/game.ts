@@ -14,6 +14,44 @@ export const GAME_LENGTH_EVENTS: Record<GameLength, number> = {
   long: 30,
 };
 
+/**
+ * Every die the engine supports for a roll — physical or virtual.
+ *
+ * This is the single source of truth: the DM agent's requested die is normalized
+ * against it, and the virtual-roll endpoint rejects anything outside it, so the
+ * DM can never ask for a die the virtual roller cannot offer.
+ */
+export const SUPPORTED_DICE: readonly DiceType[] = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100'];
+
+/** The die used when a requested type is missing or unrecognised. */
+export const DEFAULT_DICE_TYPE: DiceType = 'd20';
+
+/**
+ * Number of faces for a die type. Prefer this over `parseInt(type.slice(1))`
+ * so unsupported strings cannot silently produce a bogus face count.
+ */
+export function diceFaces(diceType: string): number {
+  const normalized = normalizeDiceType(diceType);
+  return parseInt(normalized.slice(1), 10);
+}
+
+/**
+ * Coerce arbitrary model or client input to a supported die.
+ * Returns null when the value is not a die this engine offers.
+ */
+export function parseDiceType(value: unknown): DiceType | null {
+  if (typeof value !== 'string') return null;
+  const candidate = value.trim().toLowerCase();
+  return SUPPORTED_DICE.includes(candidate as DiceType) ? (candidate as DiceType) : null;
+}
+
+/**
+ * Same as parseDiceType but falls back to the default die instead of null.
+ */
+export function normalizeDiceType(value: unknown): DiceType {
+  return parseDiceType(value) ?? DEFAULT_DICE_TYPE;
+}
+
 // ============ Character & Stats ============
 
 export interface CharacterStats {
@@ -104,6 +142,8 @@ export interface EventOutline {
 export interface WorldLore {
   worldName: string;
   worldDescription: string;
+  /** Short opening synopsis of the campaign arc, shown before the first event. */
+  adventureSummary?: string;
   sourceMaterial: string;
   locations: Location[];
   factions: Faction[];

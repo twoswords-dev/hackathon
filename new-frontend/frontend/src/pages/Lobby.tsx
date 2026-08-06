@@ -148,6 +148,12 @@ export default function Lobby() {
         <div className="lobby-section">
           <h2>📜 World Lore</h2>
           <p className="lore-text">{game?.lore?.worldDescription}</p>
+          {game?.lore?.adventureSummary && (
+            <div className="adventure-summary">
+              <h3>The Adventure Ahead</h3>
+              <p className="lore-text">{game.lore.adventureSummary}</p>
+            </div>
+          )}
           {game?.lore?.factions && game.lore.factions.length > 0 && (
             <div className="factions-list">
               <h3>Factions</h3>

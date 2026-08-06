@@ -2,10 +2,10 @@ import { Router, Request, Response } from 'express';
 import { gameSessions, players, gameState, gameEvents } from '../db';
 import { generateLore } from '../agents/loreGenerator';
 import { generateGameAssets } from '../agents/imageGenerator';
-import { startGameLoop, handleDiceResult, isGameRunning, getStepInfo } from '../game/gameLoop';
+import { startGameLoop, handleDiceResult, isGameRunning, getStepInfo, getRequestedDiceType } from '../game/gameLoop';
 import { buildCustomCharacter, SUPPORTED_RACES, SUPPORTED_CLASSES, statsFor, normalizeRace, normalizeClass } from '../game/characterPresets';
 import { sseManager } from '../sse';
-import { CreateGameRequest, GameLength, GAME_LENGTH_EVENTS, GameMap, MapTile, Character, CharacterStats } from '../types/game';
+import { CreateGameRequest, GameLength, GAME_LENGTH_EVENTS, GameMap, MapTile, Character, CharacterStats, SUPPORTED_DICE, DEFAULT_DICE_TYPE, parseDiceType, diceFaces } from '../types/game';
 
 const router = Router();
 
@@ -120,6 +120,7 @@ router.post('/create', async (req: Request, res: Response) => {
       lore: {
         worldName: worldLore.worldName,
         worldDescription: worldLore.worldDescription,
+        adventureSummary: worldLore.adventureSummary,
         locations: worldLore.locations,
         factions: worldLore.factions,
         eventCount: worldLore.eventOutlines.length,
@@ -156,6 +157,14 @@ router.get('/character-options', (_req: Request, res: Response) => {
  * GET /api/game/:sessionId
  * Get game session details
  */
+/**
+ * GET /api/game/dice-options
+ * The dice the engine supports, so the UI never offers an unsupported die.
+ */
+router.get('/dice-options', (_req: Request, res: Response) => {
+  res.json({ supportedDice: SUPPORTED_DICE, defaultDice: DEFAULT_DICE_TYPE });
+});
+
 router.get('/:sessionId', async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.params;
@@ -174,6 +183,7 @@ router.get('/:sessionId', async (req: Request, res: Response) => {
       lore: state ? {
         worldName: state.worldLore.worldName,
         worldDescription: state.worldLore.worldDescription,
+        adventureSummary: state.worldLore.adventureSummary,
         locations: state.worldLore.locations,
         factions: state.worldLore.factions,
         suggestedCharacters: state.worldLore.suggestedCharacters,
@@ -369,13 +379,16 @@ router.get('/:sessionId/state', async (req: Request, res: Response) => {
       const targetPlayer = sessionPlayers.find(
         (p) => p.playerId === state.currentTurnPlayerId
       );
+      // Prefer the live requested die; the stored event row holds the die picked
+      // at event creation, which differs during combat and boss rounds.
+      const liveDice = getRequestedDiceType(sessionId);
       diceRequest = {
         targetPlayerId: state.currentTurnPlayerId,
         targetPlayerName: targetPlayer?.playerName || 'Unknown',
         characterName: targetPlayer?.character?.name || targetPlayer?.playerName || 'Unknown',
         characterClass: targetPlayer?.character?.class || 'Adventurer',
         characterStats: targetPlayer?.character?.stats || null,
-        diceType: currentEvent?.diceType || 'd20',
+        diceType: liveDice || currentEvent?.diceType || DEFAULT_DICE_TYPE,
         reason: 'The fates demand a roll...',
         attemptNumber: 1,
       };
@@ -476,20 +489,28 @@ router.post('/:sessionId/dice-result', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'diceType and rollValue are required' });
     }
 
-    // Validate roll value
-    const maxValue = parseInt(diceType.replace('d', ''));
-    if (isNaN(maxValue) || rollValue < 1 || rollValue > maxValue) {
-      return res.status(400).json({ error: `Invalid roll: ${rollValue} for ${diceType}` });
+    // Validate the die against the supported set, then bound the roll to it.
+    const validated = parseDiceType(diceType);
+    if (!validated) {
+      return res.status(400).json({
+        error: `Unsupported dice type: ${diceType}`,
+        supportedDice: SUPPORTED_DICE,
+      });
+    }
+
+    const maxValue = diceFaces(validated);
+    if (rollValue < 1 || rollValue > maxValue) {
+      return res.status(400).json({ error: `Invalid roll: ${rollValue} for ${validated}` });
     }
 
     await handleDiceResult(sessionId, {
-      diceType,
+      diceType: validated,
       rollValue: Number(rollValue),
       source,
       confidence,
     });
 
-    res.json({ success: true, diceType, rollValue, source });
+    res.json({ success: true, diceType: validated, rollValue, source });
   } catch (err) {
     console.error('[DiceResult] Error:', err);
     res.status(500).json({
@@ -512,20 +533,39 @@ router.post('/:sessionId/dice-virtual', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'diceType is required' });
     }
 
-    const maxValue = parseInt(diceType.replace('d', ''));
-    if (isNaN(maxValue)) {
-      return res.status(400).json({ error: `Invalid dice type: ${diceType}` });
+    // Only dice the engine actually offers may be rolled. Previously any string
+    // was accepted and the face count came from a bare parseInt, so "d7" or
+    // "d999" would silently produce an off-spec roll.
+    const validated = parseDiceType(diceType);
+    if (!validated) {
+      return res.status(400).json({
+        error: `Unsupported dice type: ${diceType}`,
+        supportedDice: SUPPORTED_DICE,
+      });
     }
 
-    const rollValue = Math.floor(Math.random() * maxValue) + 1;
+    // Keep the roll aligned with what the DM actually asked for, so a client
+    // cannot swap in an easier die than the challenge requires. The live step is
+    // authoritative: combat and boss rounds request their own die each round,
+    // which the persisted event row does not track.
+    const requested = getRequestedDiceType(sessionId);
+
+    if (requested && requested !== validated) {
+      return res.status(409).json({
+        error: `The Dungeon Master asked for ${requested}, not ${validated}`,
+        requestedDice: requested,
+      });
+    }
+
+    const rollValue = Math.floor(Math.random() * diceFaces(validated)) + 1;
 
     await handleDiceResult(sessionId, {
-      diceType,
+      diceType: validated,
       rollValue,
       source: 'virtual',
     });
 
-    res.json({ success: true, diceType, rollValue, source: 'virtual' });
+    res.json({ success: true, diceType: validated, rollValue, source: 'virtual' });
   } catch (err) {
     console.error('[DiceVirtual] Error:', err);
     res.status(500).json({
