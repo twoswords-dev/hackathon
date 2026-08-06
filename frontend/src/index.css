@@ -1420,3 +1420,106 @@ body {
   text-transform: uppercase;
   margin-left: 0.3rem;
 }
+
+/* ============ Character Select (Lobby) ============ */
+
+.character-select-wrapper {
+  position: relative;
+}
+
+.character-select-wrapper.taken {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.character-claimed-badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(244, 67, 54, 0.9);
+  color: white;
+  font-size: 0.7rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.character-yours-badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(76, 175, 80, 0.9);
+  color: white;
+  font-size: 0.7rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.selecting-text {
+  text-align: center;
+  color: var(--text-secondary);
+  font-style: italic;
+  margin-top: 0.5rem;
+}
+
+/* ============ SVG Character Portraits ============ */
+
+.char-portrait-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  border-radius: 4px;
+}
+
+.dice-char-portrait-img {
+  width: 40px;
+  height: 40px;
+  image-rendering: pixelated;
+  border-radius: 4px;
+}
+
+/* ============ Crit Action Overlay ============ */
+
+.crit-action-overlay {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0.5rem 0;
+  animation: critPop 0.4s ease-out;
+}
+
+.crit-splat-img {
+  width: 100px;
+  height: 100px;
+  filter: drop-shadow(0 0 8px rgba(255, 107, 0, 0.6));
+}
+
+@keyframes critPop {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ============ Combat Encounter Styles ============ */
+
+.boss-hp-display {
+  display: inline-block;
+  background: rgba(183, 28, 28, 0.2);
+  border: 1px solid rgba(183, 28, 28, 0.4);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  color: #ef5350;
+  margin-top: 0.25rem;
+}

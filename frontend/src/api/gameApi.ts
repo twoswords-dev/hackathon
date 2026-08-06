@@ -162,3 +162,10 @@ export interface GameLoopState {
 export async function getGameState(sessionId: string): Promise<GameLoopState> {
   return request(`/game/${sessionId}/state`);
 }
+
+export async function selectCharacter(sessionId: string, playerId: string, characterId: string): Promise<{ player: Player }> {
+  return request(`/game/${sessionId}/select-character`, {
+    method: 'POST',
+    body: JSON.stringify({ playerId, characterId }),
+  });
+}

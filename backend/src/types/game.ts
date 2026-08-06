@@ -96,6 +96,9 @@ export interface EventOutline {
   locationId: string;
   difficulty: 'easy' | 'medium' | 'hard';
   requiredDiceType: DiceType;
+  type?: 'narrative' | 'combat'; // default is 'narrative'
+  enemyName?: string;
+  enemyHp?: number;
 }
 
 export interface WorldLore {

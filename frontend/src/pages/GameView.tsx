@@ -71,6 +71,12 @@ interface DiceResultData {
   bossHp?: number;
   bossMaxHp?: number;
   playerDied?: boolean;
+  isCombat?: boolean;
+  enemyHp?: number;
+  enemyMaxHp?: number;
+  enemyName?: string;
+  isCrit?: boolean;
+  critDamage?: number;
 }
 
 interface GameOverData {
@@ -164,7 +170,7 @@ export default function GameView() {
     onEvent: (event: SSEEvent) => {
       switch (event.type) {
         case 'narrative': {
-          const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string };
+          const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string; characterName?: string; characterClass?: string; playerName?: string };
           setNarratives((prev) => [...prev, {
             text: data.text,
             eventNumber: data.eventNumber,
@@ -173,6 +179,9 @@ export default function GameView() {
             diceResult: data.diceResult ?? null,
             diceType: data.diceType ?? null,
             outcome: data.outcome ?? null,
+            characterName: data.characterName,
+            characterClass: data.characterClass,
+            playerName: data.playerName,
           }]);
           setDiceRequest(null);
           setLastDiceResult(null);
@@ -189,6 +198,20 @@ export default function GameView() {
           setLastDiceResult(data);
           setDiceHistory((prev) => [...prev, data]);
           setDiceRequest(null);
+          // Also update the last narrative entry with dice result for inline display
+          setNarratives((prev) => {
+            if (prev.length === 0) return prev;
+            const updated = [...prev];
+            const last = { ...updated[updated.length - 1] };
+            last.diceResult = data.rollValue;
+            last.diceType = data.diceType;
+            last.outcome = data.outcome;
+            last.characterName = data.characterName;
+            last.characterClass = data.characterClass;
+            last.statChanges = data.statChanges;
+            updated[updated.length - 1] = last;
+            return updated;
+          });
           break;
         }
         case 'game_over': {
@@ -256,11 +279,12 @@ export default function GameView() {
 
   const getOutcomeClassFromString = (outcome: string | null): string => {
     if (!outcome) return '';
-    if (outcome.includes('Critical success') || outcome.includes('critical success')) return 'outcome-crit-success';
-    if (outcome.includes('Success') || outcome.includes('prevails')) return 'outcome-success';
-    if (outcome.includes('Partial') || outcome.includes('mixed')) return 'outcome-partial';
-    if (outcome.includes('Critical failure') || outcome.includes('disastrous')) return 'outcome-crit-fail';
-    if (outcome.includes('Failure') || outcome.includes('not go as planned')) return 'outcome-fail';
+    const o = outcome.toLowerCase();
+    if (o.includes('critical success') || o.includes('crit!') || o.includes('critical hit') || o.includes('devastates')) return 'outcome-crit-success';
+    if (o.includes('success') || o.includes('prevails') || o.includes('strikes') || o.includes('strike')) return 'outcome-success';
+    if (o.includes('partial') || o.includes('mixed') || o.includes('weak blow') || o.includes('grazes')) return 'outcome-partial';
+    if (o.includes('critical failure') || o.includes('disastrous') || o.includes('struck down')) return 'outcome-crit-fail';
+    if (o.includes('failure') || o.includes('not go as planned') || o.includes('misses') || o.includes('miss')) return 'outcome-fail';
     return '';
   };
 
@@ -271,11 +295,12 @@ export default function GameView() {
 
   const getOutcomeEmojiFromString = (outcome: string | null): string => {
     if (!outcome) return '🎲';
-    if (outcome.includes('Critical success') || outcome.includes('critical success')) return '⚡';
-    if (outcome.includes('Success') || outcome.includes('prevails')) return '✅';
-    if (outcome.includes('Partial') || outcome.includes('mixed')) return '⚠️';
-    if (outcome.includes('Critical failure') || outcome.includes('disastrous')) return '💀';
-    if (outcome.includes('Failure') || outcome.includes('not go as planned')) return '❌';
+    const o = outcome.toLowerCase();
+    if (o.includes('critical success') || o.includes('crit!') || o.includes('critical hit') || o.includes('devastates')) return '⚡';
+    if (o.includes('success') || o.includes('prevails') || o.includes('strikes') || o.includes('strike')) return '✅';
+    if (o.includes('partial') || o.includes('mixed') || o.includes('weak blow') || o.includes('grazes')) return '⚠️';
+    if (o.includes('critical failure') || o.includes('disastrous') || o.includes('struck down')) return '💀';
+    if (o.includes('failure') || o.includes('not go as planned') || o.includes('misses') || o.includes('miss')) return '❌';
     return '🎲';
   };
 
@@ -286,6 +311,17 @@ export default function GameView() {
   const characters: Character[] = game?.lore?.suggestedCharacters || [];
   const gameStatus = game?.session?.status || 'unknown';
   const isCompleted = gameStatus === 'completed';
+
+  // Helper to get character portrait by name
+  const getCharacterPortrait = (characterName: string | undefined) => {
+    if (!characterName) return <span>⚔️</span>;
+    const char = characters.find(c => c.name === characterName);
+    if (char?.portraitAssetId) {
+      const src = char.portraitAssetId.startsWith('/api/') ? char.portraitAssetId : `/api/assets/${char.portraitAssetId}`;
+      return <img src={src} alt={characterName} className="dice-char-portrait-img" />;
+    }
+    return <span>⚔️</span>;
+  };
 
   return (
     <div className="page-container game-view">
@@ -513,7 +549,9 @@ export default function GameView() {
               <div className={`dice-result-entry ${getOutcomeClass(lastDiceResult)} ${lastDiceResult.playerDied ? 'player-died' : ''}`}>
                 {/* Character + Roll Header */}
                 <div className="dice-result-character">
-                  <div className="dice-char-avatar">⚔️</div>
+                  <div className="dice-char-avatar">
+                    {getCharacterPortrait(lastDiceResult.characterName)}
+                  </div>
                   <div className="dice-char-info">
                     <span className="dice-char-name">{lastDiceResult.characterName || lastDiceResult.playerName}</span>
                     <span className="dice-char-class">{lastDiceResult.characterClass || 'Adventurer'}</span>
@@ -524,6 +562,17 @@ export default function GameView() {
                     </div>
                   )}
                 </div>
+
+                {/* Crit Action Splat */}
+                {lastDiceResult.isCrit && (
+                  <div className="crit-action-overlay">
+                    <img
+                      src={`/api/assets/crit-action/${lastDiceResult.critDamage || 20}/${lastDiceResult.rollValue}`}
+                      alt="CRIT!"
+                      className="crit-splat-img"
+                    />
+                  </div>
+                )}
 
                 {/* Roll Result */}
                 <div className="dice-result-roll">
@@ -536,7 +585,12 @@ export default function GameView() {
                     <span className={`roll-outcome-badge ${getOutcomeClass(lastDiceResult)}`}>
                       {getOutcomeEmoji(lastDiceResult)} {lastDiceResult.outcome}
                     </span>
-                    {lastDiceResult.isBossFight && lastDiceResult.bossHp !== undefined && (
+                    {(lastDiceResult.isBossFight || lastDiceResult.isCombat) && lastDiceResult.enemyHp !== undefined && (
+                      <span className="boss-hp-display">
+                        👹 {lastDiceResult.enemyName || 'Boss'} HP: {lastDiceResult.enemyHp}/{lastDiceResult.enemyMaxHp || lastDiceResult.bossMaxHp}
+                      </span>
+                    )}
+                    {lastDiceResult.isBossFight && lastDiceResult.bossHp !== undefined && !lastDiceResult.isCombat && (
                       <span className="boss-hp-display">
                         👹 Boss HP: {lastDiceResult.bossHp}/{lastDiceResult.bossMaxHp}
                       </span>

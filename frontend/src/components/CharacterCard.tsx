@@ -19,7 +19,11 @@ export default function CharacterCard({ character, selected, compact, onClick }:
     >
       <div className="char-portrait">
         {character.portraitAssetId ? (
-          <img src={`/api/assets/${character.portraitAssetId}`} alt={character.name} />
+          <img
+            src={character.portraitAssetId.startsWith('/api/') ? character.portraitAssetId : `/api/assets/${character.portraitAssetId}`}
+            alt={character.name}
+            className="char-portrait-img"
+          />
         ) : (
           <div className="char-portrait-placeholder">⚔️</div>
         )}
