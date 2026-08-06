@@ -6,7 +6,7 @@ export type GameLength = 'short' | 'medium' | 'long';
 export type SessionStatus = 'waiting_for_players' | 'in_progress' | 'paused' | 'completed';
 export type DiceType = 'd4' | 'd6' | 'd8' | 'd10' | 'd12' | 'd20' | 'd100';
 export type ActionRequired = 'dice_roll' | 'choice' | 'none';
-export type TerrainType = 'forest' | 'mountain' | 'town' | 'dungeon' | 'plains' | 'river' | 'cave' | 'castle' | 'swamp' | 'desert';
+export type TerrainType = 'forest' | 'mountain' | 'town' | 'dungeon' | 'plains' | 'river' | 'cave' | 'castle' | 'swamp' | 'desert' | 'snow';
 
 export const GAME_LENGTH_EVENTS: Record<GameLength, number> = {
   short: 5,
@@ -118,6 +118,8 @@ export interface Location {
   description: string;
   tileX: number;
   tileY: number;
+  /** Terrain at this location, chosen by the lore generator from the prompt. */
+  terrain?: TerrainType;
 }
 
 export interface Faction {
@@ -144,6 +146,8 @@ export interface WorldLore {
   worldDescription: string;
   /** Short opening synopsis of the campaign arc, shown before the first event. */
   adventureSummary?: string;
+  /** Terrain that most of the world is made of, used to fill non-location tiles. */
+  dominantTerrain?: TerrainType;
   sourceMaterial: string;
   locations: Location[];
   factions: Faction[];

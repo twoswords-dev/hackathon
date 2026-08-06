@@ -10,6 +10,7 @@ import {
   type Player,
 } from '../api/gameApi';
 import { useGameEvents } from '../hooks/useGameEvents';
+import CampaignMap from '../components/CampaignMap';
 
 export default function Lobby() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -45,6 +46,11 @@ export default function Lobby() {
     onEvent: (event) => {
       if (event.type === 'player_joined' || event.type === 'state_update') {
         if (sessionId) getGame(sessionId).then(setGame);
+      }
+      // The campaign map is illustrated in the background after creation, so
+      // refetch when it lands to show it without a page reload.
+      if (event.type === 'map_update') {
+        if (sessionId) getGame(sessionId).then(setGame).catch(() => {});
       }
       if (event.type === 'game_started') {
         navigate(`/game/${sessionId}`);
@@ -164,6 +170,16 @@ export default function Lobby() {
               ))}
             </div>
           )}
+        </div>
+
+        {/* Campaign map — shown before the adventure begins */}
+        <div className="lobby-section">
+          <h2>🗺️ Campaign Map</h2>
+          <CampaignMap
+            map={game?.map ?? null}
+            campaignMapUrl={game?.campaignMapUrl ?? null}
+            worldName={game?.lore?.worldName}
+          />
         </div>
 
         {/* Players */}

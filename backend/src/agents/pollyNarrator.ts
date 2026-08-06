@@ -31,16 +31,46 @@ export function isPollyEnabled(): boolean {
 
 /**
  * Get the configured Polly voice ID.
+ *
+ * Gregory is Amazon's deep, mature male narration voice, which suits a Dungeon
+ * Master far better than the default newsreader-toned Matthew.
  */
 function getVoiceId(): VoiceId {
-  return (process.env.POLLY_VOICE_ID as VoiceId) || 'Matthew';
+  return (process.env.POLLY_VOICE_ID as VoiceId) || 'Gregory';
 }
 
 /**
  * Get the configured Polly engine.
+ *
+ * The `long-form` engine would be the natural fit for narration, but it is not
+ * offered in every region (it is rejected in us-west-2 where this runs), so
+ * `neural` is the default and long-form can be opted into via POLLY_ENGINE
+ * where it is available.
  */
 function getEngine(): Engine {
   return (process.env.POLLY_ENGINE as Engine) || 'neural';
+}
+
+/**
+ * Wrap narration in SSML to give the DM a slower, weightier delivery.
+ *
+ * Only features the neural engine supports are used: `prosody rate` and
+ * `break`. Neural rejects `prosody pitch` with InvalidSsmlException, so pitch
+ * is deliberately absent.
+ */
+function buildSsml(text: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+  // A short pause after sentence-final punctuation lets dramatic beats land.
+  const paced = escaped.replace(/([.!?])\s+/g, '$1 <break time="350ms"/> ');
+
+  const rate = process.env.POLLY_RATE || '94%';
+  return `<speak><prosody rate="${rate}">${paced}</prosody></speak>`;
 }
 
 /**
@@ -68,15 +98,36 @@ export async function synthesizeSpeech(text: string): Promise<Buffer | null> {
   try {
     const client = createPollyClient();
 
-    const command = new SynthesizeSpeechCommand({
-      Engine: getEngine(),
-      VoiceId: getVoiceId(),
-      OutputFormat: 'mp3',
-      TextType: 'text',
-      Text: text,
-    });
+    // SSML gives the DM a measured, deliberate cadence. If the model of the
+    // moment rejects the markup we retry as plain text rather than losing the
+    // narration entirely.
+    const ssml = buildSsml(text);
 
-    const response = await client.send(command);
+    let response;
+    try {
+      response = await client.send(
+        new SynthesizeSpeechCommand({
+          Engine: getEngine(),
+          VoiceId: getVoiceId(),
+          OutputFormat: 'mp3',
+          TextType: 'ssml',
+          Text: ssml,
+        })
+      );
+    } catch (ssmlErr) {
+      console.warn(
+        `[PollyNarrator] SSML synthesis rejected (${ssmlErr instanceof Error ? ssmlErr.message : ssmlErr}); retrying as plain text`
+      );
+      response = await client.send(
+        new SynthesizeSpeechCommand({
+          Engine: getEngine(),
+          VoiceId: getVoiceId(),
+          OutputFormat: 'mp3',
+          TextType: 'text',
+          Text: text,
+        })
+      );
+    }
 
     if (!response.AudioStream) {
       console.error('[PollyNarrator] No audio stream in response');
@@ -91,7 +142,9 @@ export async function synthesizeSpeech(text: string): Promise<Buffer | null> {
     }
 
     const buffer = Buffer.concat(chunks);
-    console.log(`[PollyNarrator] Synthesized ${buffer.length} bytes for: "${text.substring(0, 50)}..."`);
+    console.log(
+      `[PollyNarrator] Synthesized ${buffer.length} bytes with ${getVoiceId()}/${getEngine()} for: "${text.substring(0, 50)}..."`
+    );
     return buffer;
   } catch (err) {
     console.error('[PollyNarrator] Failed to synthesize speech:', err);

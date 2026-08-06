@@ -160,6 +160,35 @@ export async function updateMapTiles(
 }
 
 /**
+ * Persist the campaign map image asset for a session.
+ */
+export async function setCampaignMapAsset(
+  sessionId: string,
+  campaignMapAssetId: string
+): Promise<GameState | null> {
+  const state = await getGameState(sessionId);
+  if (!state) return null;
+
+  const map = { ...state.map, campaignMapAssetId };
+
+  const result = await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAMES.gameState,
+      Key: { sessionId },
+      UpdateExpression: 'SET #map = :map, updatedAt = :now',
+      ExpressionAttributeNames: { '#map': 'map' },
+      ExpressionAttributeValues: {
+        ':map': map,
+        ':now': new Date().toISOString(),
+      },
+      ReturnValues: 'ALL_NEW',
+    })
+  );
+
+  return result.Attributes as GameState;
+}
+
+/**
  * Delete game state (cleanup)
  */
 export async function deleteGameState(sessionId: string): Promise<void> {

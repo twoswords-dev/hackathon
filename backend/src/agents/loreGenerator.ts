@@ -1,6 +1,11 @@
 import { invokeClaudeModel, MODELS } from './bedrockClient';
-import { WorldLore, GameLength, GAME_LENGTH_EVENTS, Character, DiceType, normalizeDiceType } from '../types/game';
+import { WorldLore, GameLength, GAME_LENGTH_EVENTS, Character, DiceType, TerrainType, normalizeDiceType } from '../types/game';
 import { v4 as uuidv4 } from 'uuid';
+
+/** Terrain values the engine understands, used to sanitise model output. */
+const VALID_TERRAIN: TerrainType[] = [
+  'forest', 'mountain', 'town', 'dungeon', 'plains', 'river', 'cave', 'castle', 'swamp', 'desert', 'snow',
+];
 
 const LORE_SYSTEM_PROMPT = `You are a world-building AI for a Dungeons & Dragons game engine. Your job is to create game worlds based on source material provided by the player.
 
@@ -13,13 +18,15 @@ You must output ONLY valid JSON (no markdown, no explanation text) matching this
   "worldDescription": "string - 1-2 sentences, under 180 chars",
   "adventureSummary": "string - 3-4 sentences (250-400 chars) summarising the whole campaign arc: the premise, the threat, what the party must do, and how it ends. Second person, addressed to the party.",
   "sourceMaterial": "string - the original source material reference",
+  "dominantTerrain": "forest" | "mountain" | "plains" | "river" | "cave" | "swamp" | "desert" | "snow" - the terrain that most of this world is made of, based on the source material. Use "snow" for icy, frozen, arctic or tundra worlds,
   "locations": [
     {
       "id": "string - unique id",
       "name": "string - max 20 chars",
       "description": "string - max 50 chars",
       "tileX": number (0-7),
-      "tileY": number (0-7)
+      "tileY": number (0-7),
+      "terrain": "forest" | "mountain" | "town" | "dungeon" | "plains" | "river" | "cave" | "castle" | "swamp" | "desert" | "snow" - what this specific place is
     }
   ],
   "factions": [
@@ -79,6 +86,11 @@ You must output ONLY valid JSON (no markdown, no explanation text) matching this
 Rules:
 - Generate the EXACT number of events specified
 - Create 3-4 locations on an 8x8 grid
+- Spread the locations out across the grid; do not cluster them in one corner
+- Set "terrain" on every location and set "dominantTerrain" to match the source
+  material (e.g. a desert world should not be covered in swamp)
+- campaignMapDescription should describe the actual landscape of THIS world so an
+  illustrator could draw it: name the terrain, the landmarks and the mood
 - Create 2 factions
 - Generate 4 suggested characters with varied classes
 - ALL text fields must respect the character caps noted in the schema above
@@ -146,8 +158,17 @@ Make it epic, immersive, and fun!`;
  */
 function validateAndFixLore(lore: WorldLore, expectedEvents: number, playerCount: number): WorldLore {
   // Ensure IDs are set
-  if (!lore.locations) lore.locations = [];  for (const loc of lore.locations) {
+  if (!lore.locations) lore.locations = [];
+  for (const loc of lore.locations) {
     if (!loc.id) loc.id = uuidv4();
+    // Drop terrain values outside the supported set so the map builder can rely
+    // on them without re-checking.
+    if (loc.terrain && !VALID_TERRAIN.includes(loc.terrain)) {
+      delete loc.terrain;
+    }
+  }
+  if (lore.dominantTerrain && !VALID_TERRAIN.includes(lore.dominantTerrain)) {
+    delete lore.dominantTerrain;
   }
 
   if (!lore.factions) lore.factions = [];

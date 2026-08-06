@@ -88,8 +88,23 @@ export interface CharacterOptions {
  * Pixel art URL for a character within a session.
  * Falls back to building the path when portraitAssetId was not populated.
  */
+/**
+ * Pixel art URL for a character.
+ *
+ * The current HP is appended so the portrait is refetched as the character takes
+ * damage — the art reflects injury, and without this the browser would keep
+ * showing the undamaged version. Note that game creation pre-populates
+ * portraitAssetId with this same SVG route, so the HP parameter has to be added
+ * even when that field is set.
+ */
 export function characterPortraitUrl(sessionId: string, character: Character): string {
-  return character.portraitAssetId || `/api/assets/character/${sessionId}/${character.id}/svg`;
+  const base = character.portraitAssetId || `/api/assets/character/${sessionId}/${character.id}/svg`;
+  const hp = character.stats?.hp;
+  if (typeof hp !== 'number') return base;
+  // Only our own SVG endpoint understands the hp parameter; leave external
+  // asset URLs (e.g. S3 presigned links) untouched.
+  if (!base.startsWith('/api/assets/character/')) return base;
+  return `${base}${base.includes('?') ? '&' : '?'}hp=${hp}`;
 }
 
 /** Pixel art URL for a race/class combination, usable before a game exists. */
@@ -104,13 +119,35 @@ export interface CreateGameResponse {
   session: GameSession;
   player: Player;
   lore: LoreSummary;
+  map?: GameMap | null;
+}
+
+/** A single tile of the campaign grid. */
+export interface MapTile {
+  x: number;
+  y: number;
+  terrain: string;
+  name: string;
+  isPoi: boolean;
+  explored: boolean;
+  entities: string[];
+}
+
+export interface GameMap {
+  width: number;
+  height: number;
+  tiles: MapTile[];
+  /** Set once the illustrated overview image has been generated. */
+  campaignMapAssetId: string;
 }
 
 export interface GameDetails {
   session: GameSession;
   players: Player[];
   lore: LoreSummary | null;
-  map: unknown;
+  map: GameMap | null;
+  /** Served image for the illustrated map, null until generation completes. */
+  campaignMapUrl?: string | null;
 }
 
 export interface DiceRequestData {

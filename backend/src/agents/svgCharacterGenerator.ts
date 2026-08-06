@@ -14,21 +14,141 @@ interface CharacterInput {
 }
 
 /**
+ * How battered the portrait should look. Derived from the live HP ratio so the
+ * art tracks damage taken during play.
+ */
+export type InjuryTier = 'healthy' | 'bruised' | 'wounded' | 'critical' | 'downed';
+
+/** Wound colours, layered over the body pixels. */
+const WOUND_COLOR = '#8E1616';
+const WOUND_DARK = '#5C0D0D';
+const BRUISE_COLOR = '#5B3A6E';
+
+/**
+ * Classify an HP ratio into an injury tier.
+ *
+ * 0 HP is `downed` rather than merely critical: the engine treats a character at
+ * 0 as out of the adventure, and the portrait should say so unmistakably.
+ */
+export function injuryTierFor(hp: number, maxHp: number): InjuryTier {
+  if (!Number.isFinite(hp) || !Number.isFinite(maxHp) || maxHp <= 0) return 'healthy';
+  if (hp <= 0) return 'downed';
+  const ratio = hp / maxHp;
+  if (ratio > 0.75) return 'healthy';
+  if (ratio > 0.5) return 'bruised';
+  if (ratio > 0.25) return 'wounded';
+  return 'critical';
+}
+
+/** Number of wound marks to scatter for each tier. */
+const WOUND_COUNT: Record<InjuryTier, number> = {
+  healthy: 0,
+  bruised: 2,
+  wounded: 4,
+  critical: 7,
+  downed: 8,
+};
+
+/**
+ * Deterministic hash so a given character always takes wounds in the same
+ * places. Without this the marks would jump around on every re-render.
+ */
+function hashString(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/** Small deterministic PRNG (mulberry32). */
+function makeRng(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Convert a hex colour to its greyscale equivalent (for downed portraits). */
+function toGreyscale(hex: string): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  // Rec. 601 luma, then darkened so downed clearly reads as "out".
+  const y = Math.round((0.299 * r + 0.587 * g + 0.114 * b) * 0.75);
+  const c = Math.max(0, Math.min(255, y)).toString(16).padStart(2, '0');
+  return `#${c}${c}${c}`;
+}
+
+/** Blend a colour toward white to render blood loss as pallor. */
+function paleFy(hex: string, amount: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const mix = (channel: number) => Math.round(channel + (235 - channel) * amount);
+  const r = mix((n >> 16) & 0xff);
+  const g = mix((n >> 8) & 0xff);
+  const b = mix(n & 0xff);
+  return `#${[r, g, b].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** How much pallor each tier applies to skin tones. */
+const PALLOR: Record<InjuryTier, number> = {
+  healthy: 0,
+  bruised: 0.08,
+  wounded: 0.22,
+  critical: 0.4,
+  downed: 0,
+};
+
+/**
  * Generate an SVG pixel art portrait for a character.
+ *
+ * When stats are supplied the portrait reflects damage: skin pales, wounds are
+ * scattered over the body, and a downed character is rendered grey with crossed
+ * out eyes.
  */
 export function generateCharacterSVG(character: CharacterInput): string {
   const racePalette = RACE_PALETTES[character.race] || RACE_PALETTES.Human;
   const classPalette = CLASS_PALETTES[character.class] || CLASS_PALETTES.Warrior;
   const template = CLASS_TEMPLATES[character.class] || CLASS_TEMPLATES.Warrior;
 
+  const tier = character.stats
+    ? injuryTierFor(character.stats.hp, character.stats.maxHp)
+    : 'healthy';
+
   // Merge palettes: race (1-6) + class (7-9)
-  const palette: Record<number, string> = { ...racePalette, ...classPalette };
+  let palette: Record<number, string> = { ...racePalette, ...classPalette };
+
+  // Skin (1) and skin shadow (2) drain of colour as the character weakens.
+  const pallor = PALLOR[tier];
+  if (pallor > 0) {
+    palette = { ...palette, 1: paleFy(palette[1], pallor), 2: paleFy(palette[2], pallor) };
+  }
+
+  // A downed hero is rendered entirely in greys.
+  if (tier === 'downed') {
+    palette = Object.fromEntries(
+      Object.entries(palette).map(([k, v]) => [k, toGreyscale(v)])
+    ) as Record<number, string>;
+  }
 
   const pixelSize = 8; // Each pixel is 8x8 SVG units
   const gridSize = 16;
   const svgSize = gridSize * pixelSize;
 
   let pixels = '';
+  // Track which cells are part of the body so wounds only land on the figure.
+  const bodyCells: { x: number; y: number }[] = [];
+
   for (let y = 0; y < gridSize; y++) {
     for (let x = 0; x < gridSize; x++) {
       const colorIndex = template[y]?.[x] || 0;
@@ -36,17 +156,74 @@ export function generateCharacterSVG(character: CharacterInput): string {
 
       const color = palette[colorIndex] || '#FF00FF'; // magenta for missing colors
       pixels += `<rect x="${x * pixelSize}" y="${y * pixelSize}" width="${pixelSize}" height="${pixelSize}" fill="${color}"/>`;
+
+      // Eyes (5) and eye detail (6) are excluded so wounds never cover the face
+      // in a way that reads as a rendering glitch.
+      if (colorIndex !== 5 && colorIndex !== 6) {
+        bodyCells.push({ x, y });
+      }
+    }
+  }
+
+  // Scatter wounds deterministically across the body.
+  const woundCount = WOUND_COUNT[tier];
+  if (woundCount > 0 && bodyCells.length > 0) {
+    const rng = makeRng(hashString(`${character.name}|${character.class}|${character.race}`));
+    // Shuffle a copy so each wound lands on a distinct cell.
+    const shuffled = [...bodyCells];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    const marks = shuffled.slice(0, Math.min(woundCount, shuffled.length));
+    marks.forEach((cell, i) => {
+      // Light damage shows as bruising; heavier damage as open wounds.
+      const color = tier === 'bruised' ? BRUISE_COLOR : i % 3 === 0 ? WOUND_DARK : WOUND_COLOR;
+      pixels += `<rect x="${cell.x * pixelSize}" y="${cell.y * pixelSize}" width="${pixelSize}" height="${pixelSize}" fill="${color}" opacity="0.85"/>`;
+    });
+  }
+
+  // Crossed-out eyes make a downed character unmistakable at a glance.
+  if (tier === 'downed') {
+    const eyeCells = [];
+    for (let y = 0; y < gridSize; y++) {
+      for (let x = 0; x < gridSize; x++) {
+        if (template[y]?.[x] === 5) eyeCells.push({ x, y });
+      }
+    }
+    for (const cell of eyeCells) {
+      const cx = cell.x * pixelSize;
+      const cy = cell.y * pixelSize;
+      pixels += `<path d="M${cx} ${cy} L${cx + pixelSize} ${cy + pixelSize} M${cx + pixelSize} ${cy} L${cx} ${cy + pixelSize}" stroke="${WOUND_COLOR}" stroke-width="2" fill="none"/>`;
     }
   }
 
   // Add a subtle background
-  const bgColor = getClassBgColor(character.class);
+  const bgColor = tier === 'downed' ? '#1A1A1A' : getClassBgColor(character.class);
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgSize} ${svgSize}" width="${svgSize}" height="${svgSize}" style="image-rendering: pixelated;">
+  const label = character.name.substring(0, 10);
+  const statusLabel = tier === 'downed' ? 'DOWNED' : tier === 'critical' ? 'CRITICAL' : '';
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgSize} ${svgSize}" width="${svgSize}" height="${svgSize}" style="image-rendering: pixelated;" role="img" aria-label="${escapeXmlAttr(character.name)}, ${escapeXmlAttr(character.race)} ${escapeXmlAttr(character.class)}${statusLabel ? `, ${statusLabel.toLowerCase()}` : ''}">
   <rect width="${svgSize}" height="${svgSize}" fill="${bgColor}" rx="4"/>
-  ${pixels}
-  <text x="${svgSize / 2}" y="${svgSize - 2}" font-family="monospace" font-size="6" fill="white" text-anchor="middle" opacity="0.8">${character.name.substring(0, 10)}</text>
+  ${pixels}${
+    statusLabel
+      ? `\n  <text x="${svgSize / 2}" y="10" font-family="monospace" font-size="8" font-weight="bold" fill="${WOUND_COLOR}" text-anchor="middle">${statusLabel}</text>`
+      : ''
+  }
+  <text x="${svgSize / 2}" y="${svgSize - 2}" font-family="monospace" font-size="6" fill="white" text-anchor="middle" opacity="0.8">${escapeXmlAttr(label)}</text>
 </svg>`;
+}
+
+/** Escape text destined for an XML attribute or text node. */
+function escapeXmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 /**

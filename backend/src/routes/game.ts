@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { gameSessions, players, gameState, gameEvents } from '../db';
 import { generateLore } from '../agents/loreGenerator';
-import { generateGameAssets } from '../agents/imageGenerator';
+import { generateGameAssets, generateImage } from '../agents/imageGenerator';
 import { startGameLoop, handleDiceResult, isGameRunning, getStepInfo, getRequestedDiceType } from '../game/gameLoop';
 import { buildCustomCharacter, SUPPORTED_RACES, SUPPORTED_CLASSES, statsFor, normalizeRace, normalizeClass } from '../game/characterPresets';
 import { sseManager } from '../sse';
-import { CreateGameRequest, GameLength, GAME_LENGTH_EVENTS, GameMap, MapTile, Character, CharacterStats, SUPPORTED_DICE, DEFAULT_DICE_TYPE, parseDiceType, diceFaces } from '../types/game';
+import { CreateGameRequest, GameLength, GAME_LENGTH_EVENTS, GameMap, MapTile, TerrainType, Character, CharacterStats, SUPPORTED_DICE, DEFAULT_DICE_TYPE, parseDiceType, diceFaces } from '../types/game';
 
 const router = Router();
 
@@ -65,12 +65,21 @@ router.post('/create', async (req: Request, res: Response) => {
       playerCount,
     });
 
-    // 4. Create initial map from lore
-    const map = createInitialMap(worldLore.locations.map((l) => ({
-      name: l.name,
-      x: l.tileX,
-      y: l.tileY,
-    })));
+    // 4. Create initial map from lore — terrain follows the world the prompt
+    // described rather than being randomised.
+    const map = createInitialMap({
+      locations: worldLore.locations.map((l) => ({
+        name: l.name,
+        x: l.tileX,
+        y: l.tileY,
+        terrain: l.terrain,
+      })),
+      dominantTerrain: worldLore.dominantTerrain,
+      worldDescription: worldLore.worldDescription,
+      campaignMapDescription: worldLore.campaignMapDescription,
+      sourceMaterial,
+      seed: session.sessionId,
+    });
 
     // 4b. If the host created their own character, put it at the front of the
     // roster so it is the obvious pick, and auto-assign it to them.
@@ -127,6 +136,21 @@ router.post('/create', async (req: Request, res: Response) => {
         characterCount: worldLore.suggestedCharacters.length,
         suggestedCharacters: worldLore.suggestedCharacters,
       },
+      map,
+    });
+
+    // 7. Illustrate the campaign map. This previously never ran — the generator
+    // was imported but never called, so campaignMapAssetId stayed empty and no
+    // map was ever drawn. It takes ~10s, so it runs after the response and
+    // announces itself over SSE when ready rather than delaying game creation.
+    void generateCampaignMap({
+      sessionId: session.sessionId,
+      worldName: worldLore.worldName,
+      campaignMapDescription: worldLore.campaignMapDescription,
+      worldDescription: worldLore.worldDescription,
+      dominantTerrain: worldLore.dominantTerrain,
+      locations: worldLore.locations,
+      sourceMaterial,
     });
   } catch (err) {
     console.error('[GameCreate] Error:', err);
@@ -190,6 +214,10 @@ router.get('/:sessionId', async (req: Request, res: Response) => {
         eventCount: state.worldLore.eventOutlines.length,
       } : null,
       map: state?.map || null,
+      campaignMapUrl:
+        state?.map?.campaignMapAssetId
+          ? `/api/assets/${sessionId}/campaign_map/${state.map.campaignMapAssetId}`
+          : null,
     });
   } catch (err) {
     console.error('[GameGet] Error:', err);
@@ -316,21 +344,227 @@ router.post('/:sessionId/select-character', async (req: Request, res: Response) 
 });
 
 /**
- * Create an initial 8x8 map grid with locations placed.
+ * Illustrate the campaign map from the lore and attach it to the session.
+ *
+ * Runs in the background: image generation takes several seconds and must not
+ * hold up game creation. On completion the asset id is persisted and pushed to
+ * clients via `map_update`, so the lobby can show the map as soon as it exists.
+ * Failures are logged and swallowed — the tile grid is still playable without an
+ * illustration.
  */
-function createInitialMap(locations: { name: string; x: number; y: number }[]): GameMap {
+async function generateCampaignMap(params: {
+  sessionId: string;
+  worldName: string;
+  campaignMapDescription?: string;
+  worldDescription?: string;
+  dominantTerrain?: string;
+  locations: { name: string; terrain?: string }[];
+  sourceMaterial: string;
+}): Promise<void> {
+  const {
+    sessionId,
+    worldName,
+    campaignMapDescription,
+    worldDescription,
+    dominantTerrain,
+    locations,
+    sourceMaterial,
+  } = params;
+
+  try {
+    // Build the prompt from the world the model actually described, so the
+    // picture matches the campaign instead of being generic fantasy art.
+    const landmarks = locations
+      .slice(0, 5)
+      .map((l) => (l.terrain ? `${l.name} (${l.terrain})` : l.name))
+      .filter(Boolean)
+      .join(', ');
+
+    const promptParts = [
+      'Top-down fantasy campaign map on aged parchment, hand-drawn cartography,',
+      'ink linework with muted watercolour wash, compass rose, no text labels.',
+      `World: ${worldName}.`,
+      dominantTerrain ? `Predominant terrain: ${dominantTerrain}.` : '',
+      campaignMapDescription ? `Map: ${campaignMapDescription}` : '',
+      worldDescription ? `Setting: ${worldDescription}` : '',
+      landmarks ? `Key locations to depict: ${landmarks}.` : '',
+      `Inspired by ${sourceMaterial}.`,
+    ];
+
+    const prompt = promptParts.filter(Boolean).join(' ').substring(0, 1800);
+
+    console.log(`[GameCreate] Illustrating campaign map for ${worldName}...`);
+
+    const result = await generateImage({
+      sessionId,
+      prompt,
+      imageType: 'campaign_map',
+      label: `${worldName} Campaign Map`,
+    });
+
+    const updated = await gameState.setCampaignMapAsset(sessionId, result.assetId);
+    if (!updated) {
+      console.warn(`[GameCreate] Map generated but session ${sessionId} no longer exists`);
+      return;
+    }
+
+    console.log(
+      `[GameCreate] Campaign map ready for ${worldName} (assetId=${result.assetId}, aiGenerated=${result.generated})`
+    );
+
+    sseManager.emit(sessionId, 'map_update', {
+      campaignMapAssetId: result.assetId,
+      campaignMapUrl: `/api/assets/${sessionId}/campaign_map/${result.assetId}`,
+      generated: result.generated,
+    });
+  } catch (err) {
+    console.error('[GameCreate] Campaign map generation failed:', err);
+  }
+}
+
+/**
+ * Valid terrain values, used to sanitise model output.
+ */
+const TERRAIN_VALUES: TerrainType[] = [
+  'forest', 'mountain', 'town', 'dungeon', 'plains', 'river', 'cave', 'castle', 'swamp', 'desert', 'snow',
+];
+
+/**
+ * Terrain keywords to look for when the model gives us nothing usable.
+ *
+ * Order matters: snow is tested before desert so a "frozen wasteland" is not
+ * classified as desert on the word "waste".
+ */
+const TERRAIN_KEYWORDS: [RegExp, TerrainType][] = [
+  [/snow|ice|icy|frozen|frost|tundra|arctic|glacier|winter|blizzard/i, 'snow'],
+  [/desert|dune|sand|waste|arrakis|tatooine/i, 'desert'],
+  [/swamp|marsh|bog|fen|mire/i, 'swamp'],
+  [/mountain|peak|alp|summit|crag|misty/i, 'mountain'],
+  [/forest|wood|jungle|grove|shire|tree/i, 'forest'],
+  [/cave|cavern|tunnel|mine|underdark/i, 'cave'],
+  [/river|lake|sea|coast|ocean|water|isle|island/i, 'river'],
+  [/castle|keep|fortress|citadel|palace/i, 'castle'],
+  [/dungeon|crypt|tomb|catacomb|lair/i, 'dungeon'],
+  [/city|town|village|market|port|hold/i, 'town'],
+  [/plain|field|meadow|steppe|grass/i, 'plains'],
+];
+
+/**
+ * Infer terrain from free text, so a world described as a desert does not end up
+ * rendered as swamp.
+ */
+function inferTerrain(...sources: (string | undefined)[]): TerrainType | null {
+  const haystack = sources.filter(Boolean).join(' ');
+  if (!haystack) return null;
+  for (const [pattern, terrain] of TERRAIN_KEYWORDS) {
+    if (pattern.test(haystack)) return terrain;
+  }
+  return null;
+}
+
+/** Coerce a model-supplied terrain string to a valid TerrainType. */
+function parseTerrain(value: unknown): TerrainType | null {
+  if (typeof value !== 'string') return null;
+  const candidate = value.trim().toLowerCase() as TerrainType;
+  return TERRAIN_VALUES.includes(candidate) ? candidate : null;
+}
+
+/**
+ * Build the 8x8 tile grid from the lore.
+ *
+ * Terrain used to be assigned with Math.random(), so a desert campaign could be
+ * rendered as swamp and the same session produced a different map on every
+ * call. Tiles are now derived from the world's own terrain: each location keeps
+ * the terrain the lore gave it, and the surrounding tiles blend the dominant
+ * terrain with the nearest location's, chosen deterministically from the session
+ * seed so the map is stable.
+ */
+function createInitialMap(params: {
+  locations: { name: string; x: number; y: number; terrain?: TerrainType }[];
+  dominantTerrain?: TerrainType;
+  worldDescription?: string;
+  campaignMapDescription?: string;
+  sourceMaterial?: string;
+  seed: string;
+}): GameMap {
+  const { locations, dominantTerrain, worldDescription, campaignMapDescription, sourceMaterial, seed } = params;
+
+  // What most of this world looks like: the model's own answer if valid,
+  // otherwise inferred from the world text, otherwise plains.
+  const textTerrain = inferTerrain(campaignMapDescription, worldDescription, sourceMaterial);
+  let dominant: TerrainType = parseTerrain(dominantTerrain) || textTerrain || 'plains';
+
+  // Climate sanity check. The model sometimes answers `desert` for an icy world
+  // (a "cold desert" is technically defensible but renders as sand), and the two
+  // are unmistakably opposite, so an explicit snow signal in the prompt wins.
+  const climateOpposites: Partial<Record<TerrainType, TerrainType>> = {
+    desert: 'snow',
+    snow: 'desert',
+  };
+  if (textTerrain && climateOpposites[dominant] === textTerrain) {
+    console.log(
+      `[GameCreate] Overriding dominant terrain "${dominant}" with "${textTerrain}" — the prompt describes the opposite climate`
+    );
+    dominant = textTerrain;
+  }
+
+  // A secondary terrain adds variety without turning the map into noise.
+  const secondary: TerrainType =
+    dominant === 'desert' ? 'mountain'
+    : dominant === 'snow' ? 'mountain'
+    : dominant === 'forest' ? 'river'
+    : dominant === 'mountain' ? 'cave'
+    : dominant === 'swamp' ? 'river'
+    : dominant === 'plains' ? 'forest'
+    : 'plains';
+
+  // Deterministic per session, so repeated reads render the same world.
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  let rngState = h >>> 0;
+  const rng = () => {
+    rngState = (rngState + 0x6d2b79f5) | 0;
+    let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
   const tiles: MapTile[] = [];
-  const terrainTypes: Array<'forest' | 'mountain' | 'plains' | 'river' | 'swamp'> = [
-    'forest', 'mountain', 'plains', 'river', 'swamp',
-  ];
 
   for (let y = 0; y < 8; y++) {
     for (let x = 0; x < 8; x++) {
       const location = locations.find((l) => l.x === x && l.y === y);
+
+      let terrain: TerrainType;
+      if (location) {
+        // A named place keeps its own terrain; default to a town if unspecified.
+        terrain = parseTerrain(location.terrain) || inferTerrain(location.name) || 'town';
+      } else {
+        // Tiles near a location take on its character, so the map reads as
+        // regions rather than static.
+        const nearest = locations.reduce<{ dist: number; terrain: TerrainType | null }>(
+          (best, l) => {
+            const dist = Math.abs(l.x - x) + Math.abs(l.y - y);
+            return dist < best.dist ? { dist, terrain: parseTerrain(l.terrain) } : best;
+          },
+          { dist: Infinity, terrain: null }
+        );
+
+        const roll = rng();
+        if (nearest.dist <= 1 && nearest.terrain && roll < 0.5) {
+          terrain = nearest.terrain;
+        } else {
+          terrain = roll < 0.72 ? dominant : secondary;
+        }
+      }
+
       tiles.push({
         x,
         y,
-        terrain: location ? 'town' : terrainTypes[Math.floor(Math.random() * terrainTypes.length)],
+        terrain,
         name: location?.name || '',
         isPoi: !!location,
         explored: false,

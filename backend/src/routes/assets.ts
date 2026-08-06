@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { getAssetUrl, generateImage } from '../agents/imageGenerator';
 import { generateCharacterSVG, generateCritActionSVG, generateHitActionSVG } from '../agents/svgCharacterGenerator';
 import { normalizeRace, normalizeClass, statsFor } from '../game/characterPresets';
-import { gameState } from '../db';
+import { gameState, players } from '../db';
 
 const router = Router();
 
@@ -37,6 +37,12 @@ router.get('/preview/character', (req: Request, res: Response) => {
 /**
  * GET /api/assets/character/:sessionId/:characterId/svg
  * Generate and return SVG pixel art for a character.
+ *
+ * The player record is preferred over the lore template because stat changes
+ * (HP loss) are persisted there — reading the template would always render an
+ * undamaged portrait. An optional `hp` query parameter lets the client request a
+ * specific HP state, which also serves as a cache key so the browser refetches
+ * the art as the character takes damage.
  */
 router.get('/character/:sessionId/:characterId/svg', async (req: Request, res: Response) => {
   try {
@@ -47,20 +53,34 @@ router.get('/character/:sessionId/:characterId/svg', async (req: Request, res: R
       return res.status(404).json({ error: 'Game state not found' });
     }
 
-    const character = state.worldLore.suggestedCharacters.find(c => c.id === characterId);
+    // Live player character first, falling back to the lore template.
+    const sessionPlayers = await players.getSessionPlayers(sessionId);
+    const owner = sessionPlayers.find((p) => p.character?.id === characterId);
+    const character =
+      owner?.character || state.worldLore.suggestedCharacters.find((c) => c.id === characterId);
+
     if (!character) {
       return res.status(404).json({ error: 'Character not found' });
     }
+
+    // An explicit hp overrides the stored value so the portrait can be rendered
+    // for a known state even before the write has propagated.
+    const hpParam = typeof req.query.hp === 'string' ? parseInt(req.query.hp, 10) : NaN;
+    const stats = Number.isFinite(hpParam)
+      ? { ...character.stats, hp: Math.max(0, Math.min(hpParam, character.stats.maxHp)) }
+      : character.stats;
 
     const svg = generateCharacterSVG({
       name: character.name,
       class: character.class,
       race: character.race,
-      stats: character.stats,
+      stats,
     });
 
     res.setHeader('Content-Type', 'image/svg+xml');
-    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24h
+    // Portraits change with HP, so they must not be cached for long. The hp
+    // query parameter makes distinct states individually cacheable.
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.send(svg);
   } catch (err) {
     console.error('[Assets] Error generating character SVG:', err);
