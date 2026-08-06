@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getGame, joinGame, startGame, type GameDetails, type Player } from '../api/gameApi';
+import { getGame, joinGame, startGame, selectCharacter, type GameDetails, type Player } from '../api/gameApi';
 import { useGameEvents } from '../hooks/useGameEvents';
 import CharacterCard from '../components/CharacterCard';
 
@@ -13,13 +13,37 @@ export default function Lobby() {
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState('');
   const [selectedCharacter, setSelectedCharacter] = useState<string>('');
+  const [selectingCharacter, setSelectingCharacter] = useState(false);
+
+  const handleSelectCharacter = async (characterId: string) => {
+    if (!sessionId || !player || selectingCharacter) return;
+    setSelectingCharacter(true);
+    setError('');
+    try {
+      const result = await selectCharacter(sessionId, player.playerId, characterId);
+      setSelectedCharacter(characterId);
+      setPlayer(result.player);
+      sessionStorage.setItem(`player_${sessionId}`, JSON.stringify(result.player));
+      // Refresh game to see updated player list
+      const updated = await getGame(sessionId);
+      setGame(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to select character');
+    } finally {
+      setSelectingCharacter(false);
+    }
+  };
 
   // Load player from session storage
   useEffect(() => {
     if (sessionId) {
       const stored = sessionStorage.getItem(`player_${sessionId}`);
       if (stored) {
-        setPlayer(JSON.parse(stored));
+        const p = JSON.parse(stored);
+        setPlayer(p);
+        if (p.character?.id) {
+          setSelectedCharacter(p.character.id);
+        }
       }
     }
   }, [sessionId]);
@@ -153,15 +177,30 @@ export default function Lobby() {
         <div className="lobby-section full-width">
           <h2>⚔️ Choose Your Character</h2>
           <div className="character-grid">
-            {game?.lore?.suggestedCharacters.map((char) => (
-              <CharacterCard
-                key={char.id}
-                character={char}
-                selected={selectedCharacter === char.id}
-                onClick={() => setSelectedCharacter(char.id)}
-              />
-            ))}
+            {game?.lore?.suggestedCharacters.map((char) => {
+              const claimedBy = game.players.find(p => p.character?.id === char.id);
+              const isMine = claimedBy?.playerId === player.playerId;
+              const isTaken = !!claimedBy && !isMine;
+              return (
+                <div key={char.id} className={`character-select-wrapper ${isTaken ? 'taken' : ''}`}>
+                  <CharacterCard
+                    character={char}
+                    selected={selectedCharacter === char.id || isMine}
+                    onClick={() => !isTaken && handleSelectCharacter(char.id)}
+                  />
+                  {isTaken && (
+                    <div className="character-claimed-badge">
+                      Claimed by {claimedBy.playerName}
+                    </div>
+                  )}
+                  {isMine && (
+                    <div className="character-yours-badge">✓ Your Character</div>
+                  )}
+                </div>
+              );
+            })}
           </div>
+          {selectingCharacter && <p className="selecting-text">Selecting character...</p>}
         </div>
 
         {/* Start Game */}

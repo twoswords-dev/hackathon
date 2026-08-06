@@ -1,8 +1,83 @@
 import { Router, Request, Response } from 'express';
 import { getAssetUrl, generateImage } from '../agents/imageGenerator';
+import { generateCharacterSVG, generateCritActionSVG, generateHitActionSVG } from '../agents/svgCharacterGenerator';
 import { gameState } from '../db';
 
 const router = Router();
+
+/**
+ * GET /api/assets/character/:sessionId/:characterId/svg
+ * Generate and return SVG pixel art for a character.
+ */
+router.get('/character/:sessionId/:characterId/svg', async (req: Request, res: Response) => {
+  try {
+    const { sessionId, characterId } = req.params;
+
+    const state = await gameState.getGameState(sessionId);
+    if (!state) {
+      return res.status(404).json({ error: 'Game state not found' });
+    }
+
+    const character = state.worldLore.suggestedCharacters.find(c => c.id === characterId);
+    if (!character) {
+      return res.status(404).json({ error: 'Character not found' });
+    }
+
+    const svg = generateCharacterSVG({
+      name: character.name,
+      class: character.class,
+      race: character.race,
+      stats: character.stats,
+    });
+
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24h
+    res.send(svg);
+  } catch (err) {
+    console.error('[Assets] Error generating character SVG:', err);
+    res.status(500).json({ error: 'Failed to generate character SVG' });
+  }
+});
+
+/**
+ * GET /api/assets/crit-action/:damage/:diceRoll
+ * Generate and return crit action splat SVG.
+ */
+router.get('/crit-action/:damage/:diceRoll', (req: Request, res: Response) => {
+  try {
+    const damage = parseInt(req.params.damage) || 20;
+    const diceRoll = parseInt(req.params.diceRoll) || 20;
+
+    const svg = generateCritActionSVG(damage, diceRoll);
+
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(svg);
+  } catch (err) {
+    console.error('[Assets] Error generating crit SVG:', err);
+    res.status(500).json({ error: 'Failed to generate crit action SVG' });
+  }
+});
+
+/**
+ * GET /api/assets/hit-action/:damage/:diceRoll
+ * Generate and return hit action SVG.
+ */
+router.get('/hit-action/:damage/:diceRoll', (req: Request, res: Response) => {
+  try {
+    const damage = parseInt(req.params.damage) || 10;
+    const diceRoll = parseInt(req.params.diceRoll) || 10;
+
+    const svg = generateHitActionSVG(damage, diceRoll);
+
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(svg);
+  } catch (err) {
+    console.error('[Assets] Error generating hit SVG:', err);
+    res.status(500).json({ error: 'Failed to generate hit action SVG' });
+  }
+});
 
 /**
  * GET /api/assets/:sessionId/:assetId

@@ -16,6 +16,17 @@ const bossFights = new Map<string, {
   deadPlayers: Set<string>;
 }>();
 
+// Combat encounter state (in-memory per session) - for mid-game combat events
+const combatEncounters = new Map<string, {
+  enemyHp: number;
+  enemyMaxHp: number;
+  enemyName: string;
+  eventNumber: number;
+  roundNumber: number;
+  playerIndex: number;
+  deadPlayers: Set<string>;
+}>();
+
 /**
  * Start the game loop for a session.
  */
@@ -198,9 +209,18 @@ async function generateAndBroadcastNarrative(
     characterName: character.name,
     characterClass: character.class,
     playerName: activePlayer.playerName,
+    isCombat: eventOutline.type === 'combat',
+    enemyName: eventOutline.enemyName,
+    enemyHp: eventOutline.enemyHp,
   });
 
-  // Broadcast dice request tied to the character
+  // If this is a combat event, start a combat encounter loop
+  if (eventOutline.type === 'combat' && eventOutline.enemyName && eventOutline.enemyHp) {
+    await startCombatEncounter(sessionId, eventNumber, eventOutline, sessionPlayers, state);
+    return;
+  }
+
+  // Broadcast dice request tied to the character (single roll events)
   const diceType = dmResponse.dice_type || eventOutline.requiredDiceType || 'd20';
   sseManager.emit(sessionId, 'dice_request', {
     targetPlayerId: activePlayer.playerId,
@@ -214,6 +234,215 @@ async function generateAndBroadcastNarrative(
   });
 
   console.log(`[GameLoop] Event ${eventNumber}: ${character.name} (${activePlayer.playerName}) rolls ${diceType}`);
+}
+
+/**
+ * Start a combat encounter for a mid-game event.
+ */
+async function startCombatEncounter(
+  sessionId: string,
+  eventNumber: number,
+  eventOutline: { enemyName?: string; enemyHp?: number; title: string },
+  sessionPlayers: Player[],
+  state: GameState
+): Promise<void> {
+  const enemyHp = eventOutline.enemyHp || sessionPlayers.length * 30;
+  const enemyName = eventOutline.enemyName || 'Enemy';
+
+  combatEncounters.set(sessionId, {
+    enemyHp,
+    enemyMaxHp: enemyHp,
+    enemyName,
+    eventNumber,
+    roundNumber: 1,
+    playerIndex: 0,
+    deadPlayers: new Set(),
+  });
+
+  console.log(`[Combat] Starting encounter: ${enemyName} (HP: ${enemyHp}) at event ${eventNumber}`);
+
+  // Request first player's roll
+  await requestCombatRoll(sessionId);
+}
+
+/**
+ * Request the next roll in a combat encounter.
+ */
+async function requestCombatRoll(sessionId: string): Promise<void> {
+  const combat = combatEncounters.get(sessionId);
+  if (!combat) return;
+
+  const sessionPlayers = await players.getSessionPlayers(sessionId);
+  const state = await gameState.getGameState(sessionId);
+  if (!state) return;
+
+  // Find next alive player
+  let attempts = 0;
+  while (combat.deadPlayers.has(sessionPlayers[combat.playerIndex]?.playerId) && attempts < sessionPlayers.length) {
+    combat.playerIndex = (combat.playerIndex + 1) % sessionPlayers.length;
+    attempts++;
+  }
+
+  // All players dead? End combat as loss
+  if (attempts >= sessionPlayers.length || combat.deadPlayers.size >= sessionPlayers.length) {
+    await endCombatEncounter(sessionId, false);
+    return;
+  }
+
+  const activePlayer = sessionPlayers[combat.playerIndex];
+  const character = state.worldLore.suggestedCharacters.find(
+    c => c.id === activePlayer?.character?.id
+  ) || state.worldLore.suggestedCharacters[combat.playerIndex % state.worldLore.suggestedCharacters.length];
+
+  await gameState.setWaitingForDice(sessionId, true);
+  await gameState.updateTurn(sessionId, activePlayer.playerId, combat.roundNumber);
+
+  sseManager.emit(sessionId, 'dice_request', {
+    targetPlayerId: activePlayer.playerId,
+    targetPlayerName: activePlayer.playerName,
+    characterName: character?.name || activePlayer.playerName,
+    characterClass: character?.class || 'Adventurer',
+    characterStats: character?.stats || null,
+    diceType: 'd20',
+    reason: `${character?.name || activePlayer.playerName} attacks ${combat.enemyName}! (Enemy HP: ${combat.enemyHp}/${combat.enemyMaxHp})`,
+    attemptNumber: combat.roundNumber,
+    isCombat: true,
+    enemyHp: combat.enemyHp,
+    enemyMaxHp: combat.enemyMaxHp,
+    enemyName: combat.enemyName,
+  });
+}
+
+/**
+ * Handle dice result during a combat encounter.
+ */
+async function handleCombatDiceResult(
+  sessionId: string,
+  diceResult: DiceResultInput,
+  targetPlayer: Player | undefined,
+  character: { name: string; class: string; stats: { hp: number; maxHp: number; str: number; dex: number; int: number; wis: number; cha: number; con: number } } | undefined
+): Promise<void> {
+  const combat = combatEncounters.get(sessionId);
+  if (!combat) return;
+
+  const rollValue = diceResult.rollValue;
+  const maxValue = parseInt(diceResult.diceType.replace('d', ''));
+  const charName = character?.name || targetPlayer?.playerName || 'Hero';
+
+  let damage = 0;
+  let outcome = '';
+  let statChanges: StatChange[] = [];
+  let playerDied = false;
+
+  if (rollValue >= maxValue * 0.9) {
+    // Crit — massive damage
+    damage = 20;
+    outcome = `⚡ CRIT! ${charName} devastates ${combat.enemyName} for ${damage} damage!`;
+    statChanges = [{ playerId: targetPlayer?.playerId || '', stat: 'str', delta: 1 }];
+  } else if (rollValue >= maxValue * 0.5) {
+    // Hit — solid damage
+    damage = 10;
+    outcome = `✅ ${charName} strikes ${combat.enemyName} for ${damage} damage!`;
+  } else if (rollValue >= maxValue * 0.25) {
+    // Glancing blow + retaliation
+    damage = 3;
+    outcome = `⚠️ ${charName} grazes ${combat.enemyName} (${damage} dmg) but takes a hit! -5 HP`;
+    statChanges = [{ playerId: targetPlayer?.playerId || '', stat: 'hp', delta: -5 }];
+  } else if (rollValue > 1) {
+    // Miss + heavy retaliation
+    damage = 0;
+    outcome = `❌ ${charName} misses! ${combat.enemyName} retaliates! -10 HP`;
+    statChanges = [{ playerId: targetPlayer?.playerId || '', stat: 'hp', delta: -10 }];
+  } else {
+    // Crit fail — character is downed
+    damage = 0;
+    outcome = `💀 Critical failure! ${charName} is struck down by ${combat.enemyName}!`;
+    statChanges = [{ playerId: targetPlayer?.playerId || '', stat: 'hp', delta: -999 }];
+    playerDied = true;
+    if (targetPlayer) combat.deadPlayers.add(targetPlayer.playerId);
+  }
+
+  // Apply damage to enemy
+  combat.enemyHp = Math.max(0, combat.enemyHp - damage);
+
+  // Broadcast the result
+  sseManager.emit(sessionId, 'dice_result', {
+    playerId: targetPlayer?.playerId || '',
+    playerName: targetPlayer?.playerName || 'Unknown',
+    characterName: charName,
+    characterClass: character?.class || 'Adventurer',
+    characterStats: character?.stats || null,
+    diceType: diceResult.diceType,
+    rollValue,
+    maxValue,
+    source: diceResult.source,
+    outcome,
+    reason: `Attack ${combat.enemyName}`,
+    difficulty: 'medium',
+    statChanges,
+    isCombat: true,
+    enemyHp: combat.enemyHp,
+    enemyMaxHp: combat.enemyMaxHp,
+    enemyName: combat.enemyName,
+    playerDied,
+    isCrit: rollValue >= maxValue * 0.9,
+    critDamage: rollValue >= maxValue * 0.9 ? damage : undefined,
+  });
+
+  console.log(`[Combat] ${charName}: rolled ${rollValue} → ${damage} dmg → ${combat.enemyName} HP: ${combat.enemyHp}/${combat.enemyMaxHp}`);
+
+  // Check if enemy is dead
+  if (combat.enemyHp <= 0) {
+    await endCombatEncounter(sessionId, true);
+    return;
+  }
+
+  // Move to next player
+  const sessionPlayers = await players.getSessionPlayers(sessionId);
+  combat.playerIndex = (combat.playerIndex + 1) % sessionPlayers.length;
+
+  // Check if we've gone around — new round
+  if (combat.playerIndex === 0) {
+    combat.roundNumber++;
+  }
+
+  // Request next roll after brief pause
+  setTimeout(() => requestCombatRoll(sessionId), 1500);
+}
+
+/**
+ * End a combat encounter.
+ */
+async function endCombatEncounter(sessionId: string, playersWon: boolean): Promise<void> {
+  const combat = combatEncounters.get(sessionId);
+  if (!combat) return;
+
+  const session = await gameSessions.getGameSession(sessionId);
+  if (!session) return;
+
+  // Complete the event in DB
+  await gameEvents.completeEvent(sessionId, combat.eventNumber, {
+    outcome: playersWon
+      ? `Victory! ${combat.enemyName} has been defeated!`
+      : `A hero has fallen to ${combat.enemyName}... The party presses on.`,
+  });
+
+  // Broadcast combat end narrative
+  sseManager.emit(sessionId, 'narrative', {
+    text: playersWon
+      ? `⚔️ ${combat.enemyName} falls! The heroes are victorious! (${combat.enemyMaxHp} HP dealt)`
+      : `💀 A hero has fallen to ${combat.enemyName}. The remaining party steels themselves and moves on.`,
+    eventNumber: combat.eventNumber,
+    title: playersWon ? `⚔️ Victory: ${combat.enemyName} Defeated` : `💀 Fallen to ${combat.enemyName}`,
+    isCombat: true,
+    enemyHp: 0,
+    enemyMaxHp: combat.enemyMaxHp,
+  });
+
+  combatEncounters.delete(sessionId);
+
+  // Continue to next event (game doesn't end on mid-combat death, only boss)
+  setTimeout(() => advanceToNextEvent(sessionId), 2000);
 }
 
 /**
@@ -349,6 +578,12 @@ export async function handleDiceResult(
   const character = state.worldLore.suggestedCharacters.find(
     c => c.id === targetPlayer?.character?.id
   ) || state.worldLore.suggestedCharacters[0];
+
+  // === COMBAT ENCOUNTER HANDLING ===
+  if (combatEncounters.has(sessionId)) {
+    await handleCombatDiceResult(sessionId, diceResult, targetPlayer, character);
+    return;
+  }
 
   // === BOSS FIGHT HANDLING ===
   if (bossFights.has(sessionId)) {

@@ -69,34 +69,10 @@ router.post('/create', async (req: Request, res: Response) => {
       y: l.tileY,
     })));
 
-    // 4b. Generate images (DISABLED FOR TESTING)
-    /*
-    let imageAssets;
-    try {
-      imageAssets = await generateGameAssets({
-        sessionId: session.sessionId,
-        campaignMapDescription: worldLore.campaignMapDescription,
-        characters: worldLore.suggestedCharacters.map((c) => ({
-          id: c.id,
-          name: c.name,
-          description: c.description,
-          class: c.class,
-        })),
-      });
-
-      // Update character portrait asset IDs
-      for (const asset of imageAssets.characterAssets) {
-        const char = worldLore.suggestedCharacters.find((c) => c.id === asset.characterId);
-        if (char) char.portraitAssetId = asset.assetId;
-      }
-
-      // Update map with campaign asset ID
-      map.campaignMapAssetId = imageAssets.campaignMapAssetId;
-      console.log(`[GameCreate] Generated ${imageAssets.characterAssets.length + 1} images`);
-    } catch (err) {
-      console.warn(`[GameCreate] Image generation failed (non-fatal):`, err);
+    // 4b. Assign SVG pixel art portrait URLs to characters
+    for (const char of worldLore.suggestedCharacters) {
+      char.portraitAssetId = `/api/assets/character/${session.sessionId}/${char.id}/svg`;
     }
-    */
 
     // 5. Store game state with lore and map
     const state = await gameState.createGameState({
@@ -211,6 +187,77 @@ router.post('/:sessionId/join', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[GameJoin] Error:', err);
     res.status(500).json({ error: 'Failed to join game' });
+  }
+});
+
+/**
+ * POST /api/game/:sessionId/select-character
+ * Select a character for a player (during lobby)
+ */
+router.post('/:sessionId/select-character', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+    const { playerId, characterId } = req.body;
+
+    if (!playerId || !characterId) {
+      return res.status(400).json({ error: 'playerId and characterId are required' });
+    }
+
+    const session = await gameSessions.getGameSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (session.status !== 'waiting_for_players') {
+      return res.status(400).json({ error: 'Cannot select character after game has started' });
+    }
+
+    const state = await gameState.getGameState(sessionId);
+    if (!state) {
+      return res.status(404).json({ error: 'Game state not found' });
+    }
+
+    // Find the character in the lore
+    const character = state.worldLore.suggestedCharacters.find(c => c.id === characterId);
+    if (!character) {
+      return res.status(404).json({ error: 'Character not found in this game' });
+    }
+
+    // Check if character is already taken by another player
+    const sessionPlayers = await players.getSessionPlayers(sessionId);
+    const alreadyTaken = sessionPlayers.find(
+      p => p.character?.id === characterId && p.playerId !== playerId
+    );
+    if (alreadyTaken) {
+      return res.status(409).json({
+        error: `Character "${character.name}" is already taken by ${alreadyTaken.playerName}`,
+      });
+    }
+
+    // Verify the player exists in this session
+    const player = sessionPlayers.find(p => p.playerId === playerId);
+    if (!player) {
+      return res.status(404).json({ error: 'Player not found in this session' });
+    }
+
+    // Assign the character
+    const updatedPlayer = await players.assignCharacter(sessionId, playerId, character);
+
+    // Broadcast so other players see the selection
+    sseManager.emit(sessionId, 'player_joined', {
+      playerId: updatedPlayer.playerId,
+      playerName: updatedPlayer.playerName,
+      characterId: character.id,
+      characterName: character.name,
+      totalPlayers: sessionPlayers.length,
+    });
+
+    console.log(`[CharSelect] ${updatedPlayer.playerName} selected ${character.name} (${character.class})`);
+
+    res.json({ player: updatedPlayer });
+  } catch (err) {
+    console.error('[CharSelect] Error:', err);
+    res.status(500).json({ error: 'Failed to select character' });
   }
 });
 

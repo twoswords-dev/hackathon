@@ -36,7 +36,10 @@ You must output ONLY valid JSON (no markdown, no explanation text) matching this
       "description": "string - max 80 chars",
       "locationId": "string - reference to a location id",
       "difficulty": "easy" | "medium" | "hard",
-      "requiredDiceType": "d4" | "d6" | "d8" | "d10" | "d12" | "d20"
+      "requiredDiceType": "d4" | "d6" | "d8" | "d10" | "d12" | "d20",
+      "type": "narrative" | "combat",
+      "enemyName": "string (only for combat type) - max 25 chars",
+      "enemyHp": number (only for combat type, 20-80 based on difficulty)
     }
   ],
   "campaignMapDescription": "string - short map description, max 80 chars",
@@ -78,7 +81,10 @@ Rules:
 - Create 2 factions
 - Generate 4 suggested characters with varied classes
 - ALL text fields must be very short (under 100 chars) - this is for testing
-- Stats should be balanced but varied per class`;
+- Stats should be balanced but varied per class
+- Make 30-40% of events "combat" type with enemyName and enemyHp. The rest should be "narrative" type.
+- Combat enemyHp: easy=20-30, medium=30-50, hard=50-80
+- The LAST event should always be "narrative" (the final boss is handled separately by the engine)`;
 
 /**
  * Generate world lore from source material using Bedrock Claude.
@@ -154,21 +160,33 @@ function validateAndFixLore(lore: WorldLore, expectedEvents: number, playerCount
     console.warn(`[LoreGenerator] Only ${lore.eventOutlines.length}/${expectedEvents} events generated, padding...`);
     while (lore.eventOutlines.length < expectedEvents) {
       const n = lore.eventOutlines.length + 1;
+      const isCombat = n % 3 === 0; // every 3rd padded event is combat
+      const diff = n > expectedEvents * 0.7 ? 'hard' : n > expectedEvents * 0.3 ? 'medium' : 'easy';
       lore.eventOutlines.push({
         eventNumber: n,
-        title: `Event ${n}`,
-        description: `A challenging encounter awaits the adventurers.`,
+        title: isCombat ? `Combat ${n}` : `Event ${n}`,
+        description: isCombat ? `A dangerous foe blocks the path.` : `A challenging encounter awaits the adventurers.`,
         locationId: lore.locations[0]?.id || 'unknown',
-        difficulty: n > expectedEvents * 0.7 ? 'hard' : n > expectedEvents * 0.3 ? 'medium' : 'easy',
+        difficulty: diff,
         requiredDiceType: 'd20' as DiceType,
+        type: isCombat ? 'combat' : 'narrative',
+        enemyName: isCombat ? `Shadow Beast` : undefined,
+        enemyHp: isCombat ? (diff === 'hard' ? 60 : diff === 'medium' ? 40 : 25) : undefined,
       });
     }
   }
 
-  // Ensure event numbers are sequential
+  // Ensure event numbers are sequential and validate combat fields
   lore.eventOutlines = lore.eventOutlines.slice(0, expectedEvents);
   lore.eventOutlines.forEach((event, i) => {
     event.eventNumber = i + 1;
+    if (!event.type) event.type = 'narrative';
+    if (event.type === 'combat') {
+      if (!event.enemyName) event.enemyName = 'Dark Creature';
+      if (!event.enemyHp) {
+        event.enemyHp = event.difficulty === 'hard' ? 60 : event.difficulty === 'medium' ? 40 : 25;
+      }
+    }
   });
 
   // Validate characters
