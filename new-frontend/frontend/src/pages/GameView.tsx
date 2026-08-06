@@ -1,33 +1,24 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   getGame,
   getGameState,
   rollVirtualDice,
   submitDiceResult,
+  characterPortraitUrl,
   type GameDetails,
   type DiceRequestData,
   type DiceResultData,
   type GameOverData,
-  type StatChange,
+  type GameStepInfo,
   type Character,
+  type CharacterStats,
 } from '../api/gameApi';
 import { useGameEvents, type SSEEvent } from '../hooks/useGameEvents';
 import DungeonMaster from '../components/DungeonMaster';
 import VideoScreen from '../components/VideoScreen';
 import ChatPanel from '../components/ChatPanel';
 import type { ChatMessage } from '../types';
-
-interface NarrativeEntry {
-  text: string;
-  eventNumber: number;
-  title: string;
-  timestamp: string;
-  diceResult: number | null;
-  diceType: string | null;
-  outcome: string | null;
-  statChanges?: StatChange[];
-}
 
 let nextId = 0;
 const makeId = () => `${Date.now()}-${nextId++}`;
@@ -37,7 +28,6 @@ export default function GameView() {
 
   // Game state
   const [game, setGame] = useState<GameDetails | null>(null);
-  const [narratives, setNarratives] = useState<NarrativeEntry[]>([]);
   const [diceRequest, setDiceRequest] = useState<DiceRequestData | null>(null);
   const [lastDiceResult, setLastDiceResult] = useState<DiceResultData | null>(null);
   const [gameOver, setGameOver] = useState<GameOverData | null>(null);
@@ -48,6 +38,17 @@ export default function GameView() {
   const [dmSpeechText, setDmSpeechText] = useState('');
   const [dmAudioUrl, setDmAudioUrl] = useState<string | undefined>(undefined);
   const [nextStepText, setNextStepText] = useState('Awaiting the Dungeon Master...');
+
+  // Authoritative current-step info, pushed by the backend as `step_update`.
+  const [step, setStep] = useState<GameStepInfo | null>(null);
+  // Once live step events arrive, the periodic /state poll must not overwrite them.
+  const hasLiveStep = useRef(false);
+  // Chat history is only seeded from the server once, then driven by live events.
+  const hasSeededChat = useRef(false);
+
+  // Live character stats for this player, applied immediately from dice results
+  // so the HP bar moves without waiting for a refetch.
+  const [liveStats, setLiveStats] = useState<CharacterStats | null>(null);
 
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -64,18 +65,27 @@ export default function GameView() {
 
   // Get the active character from game state
   const getActiveCharacter = (): Character | null => {
-    if (!game?.lore?.suggestedCharacters) return null;
-    // In a single-player game, the first character is theirs
-    // In multiplayer, find the character assigned to the current player
+    if (!game) return null;
+
+    // The player record is authoritative: stat changes are persisted there.
     if (player && game.players) {
-      const myPlayer = game.players.find(p => p.playerId === player.playerId);
+      const myPlayer = game.players.find((p) => p.playerId === player.playerId);
       if (myPlayer?.character) return myPlayer.character;
     }
-    // Fallback: return first suggested character
-    return game.lore.suggestedCharacters[0] || null;
+    // Fallback for observers or before a character has been assigned.
+    return game.lore?.suggestedCharacters?.[0] || null;
   };
 
-  const activeCharacter = getActiveCharacter();
+  const baseCharacter = getActiveCharacter();
+
+  // Overlay the freshest stats we have seen for this character.
+  const activeCharacter: Character | null = baseCharacter
+    ? { ...baseCharacter, stats: liveStats ?? baseCharacter.stats }
+    : null;
+
+  const isMyTurn = Boolean(
+    player && step?.activePlayerId && step.activePlayerId === player.playerId
+  );
 
   // Load game info
   useEffect(() => {
@@ -83,7 +93,7 @@ export default function GameView() {
     getGame(sessionId).then(setGame).catch((e) => setError(e.message));
   }, [sessionId]);
 
-  // Hydrate from game state on mount
+  // Hydrate from game state on mount, then poll as a safety net for reconnects
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
@@ -93,34 +103,44 @@ export default function GameView() {
         const state = await getGameState(sessionId);
         if (cancelled) return;
 
-        if (state.narrativeHistory && state.narrativeHistory.length > 0) {
-          setNarratives(
-            state.narrativeHistory.map((n) => ({
-              text: n.text,
-              eventNumber: n.eventNumber,
-              title: n.title,
-              timestamp: new Date().toISOString(),
-              diceResult: n.diceResult ?? null,
-              diceType: n.diceType ?? null,
-              outcome: n.outcome ?? null,
-              statChanges: n.statChanges || [],
-            }))
-          );
-          const last = state.narrativeHistory[state.narrativeHistory.length - 1];
-          if (last) {
-            setNextStepText(last.text);
-          }
+        if (state.narrativeHistory && state.narrativeHistory.length > 0 && !hasSeededChat.current) {
+          // Restore the story so far after a refresh or reconnect.
+          hasSeededChat.current = true;
+          setMessages((prev) => {
+            if (prev.length > 0) return prev;
+            return state.narrativeHistory.map((n) => ({
+              id: makeId(),
+              role: 'dm' as const,
+              text: [
+                n.title ? `📜 ${n.title}` : null,
+                n.text,
+                n.diceResult !== null ? `🎲 Rolled ${n.diceResult}${n.diceType ? ` (${n.diceType.toUpperCase()})` : ''}` : null,
+                n.outcome,
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
+              timestamp: Date.now(),
+            }));
+          });
+        }
+
+        // Only seed the step panel from polling until live events take over,
+        // otherwise the poll would keep reverting it to a stale snapshot.
+        if (!hasLiveStep.current && state.step) {
+          setStep(state.step);
         }
 
         if (state.waitingForDice && state.diceRequest) {
-          setDiceRequest(state.diceRequest);
-          setPendingDiceType(state.diceRequest.diceType);
-          setDiceSubmitted(false);
-          setNextStepText(`Waiting for ${state.diceRequest.targetPlayerName} to roll ${state.diceRequest.diceType.toUpperCase()}...`);
+          setDiceRequest((prev) => prev ?? state.diceRequest);
+          setPendingDiceType((prev) => prev ?? state.diceRequest!.diceType);
         }
 
         if (state.status === 'completed') {
-          setGameOver({ summary: 'The adventure has come to an end!', totalTurns: state.currentEvent, playerStats: [] });
+          setGameOver((prev) => prev ?? {
+            summary: 'The adventure has come to an end!',
+            totalTurns: state.currentEvent,
+            playerStats: [],
+          });
         }
       } catch {
         // State may not exist yet
@@ -136,6 +156,17 @@ export default function GameView() {
   // Handle SSE events
   const handleSSEEvent = useCallback((event: SSEEvent) => {
     switch (event.type) {
+      case 'step_update': {
+        // Authoritative current-step info from the engine.
+        hasLiveStep.current = true;
+        const data = event.data as GameStepInfo;
+        setStep(data);
+        // Keep my own stats in sync when the step carries them.
+        if (player && data.activePlayerId === player.playerId && data.characterStats) {
+          setLiveStats(data.characterStats);
+        }
+        break;
+      }
       case 'narrative': {
         const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string; audioUrl?: string };
         const entry: NarrativeEntry = {
@@ -148,6 +179,7 @@ export default function GameView() {
           outcome: data.outcome ?? null,
         };
         setNarratives((prev) => [...prev, entry]);
+        const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string };
         setDiceRequest(null);
         setLastDiceResult(null);
         setPendingDiceType(null);
@@ -157,7 +189,6 @@ export default function GameView() {
         setDmSpeechText(data.text);
         setDmAudioUrl(data.audioUrl);
         setIsDmSpeaking(true);
-        setNextStepText(data.text);
         setIsDmThinking(false);
 
         // Add to chat
@@ -177,12 +208,6 @@ export default function GameView() {
         setLastRollValue(null);
         setDiceSubmitted(false);
 
-        const isMe = player && data.targetPlayerId === player.playerId;
-        const stepText = isMe
-          ? `🎯 Your turn! Roll ${data.diceType.toUpperCase()} — ${data.reason}`
-          : `⏳ Waiting for ${data.targetPlayerName} to roll ${data.diceType.toUpperCase()}...`;
-        setNextStepText(stepText);
-
         setMessages((prev) => [...prev, {
           id: makeId(),
           role: 'dm',
@@ -199,8 +224,17 @@ export default function GameView() {
         setPendingDiceType(null);
         setLastRollValue(data.rollValue);
 
+        // Apply the persisted stat line for this player immediately.
+        const mineFromMap = player ? data.updatedStats?.[player.playerId] : undefined;
+        if (mineFromMap) {
+          setLiveStats(mineFromMap);
+        } else if (player && data.playerId === player.playerId && data.characterStats) {
+          setLiveStats(data.characterStats);
+        }
+        // Refetch so the authoritative player record (and other players) catch up.
+        if (sessionId) getGame(sessionId).then(setGame).catch(() => {});
+
         const resultText = `🎲 ${data.playerName} rolled ${data.rollValue}/${data.maxValue} (${data.diceType.toUpperCase()}) — ${data.outcome}`;
-        setNextStepText(resultText);
 
         // Add result to chat
         setMessages((prev) => [...prev, {
@@ -222,7 +256,6 @@ export default function GameView() {
         setGameOver(data);
         setDiceRequest(null);
         setPendingDiceType(null);
-        setNextStepText('🏆 Adventure Complete!');
         setDmSpeechText(data.summary);
         setIsDmSpeaking(true);
 
@@ -235,7 +268,7 @@ export default function GameView() {
         break;
       }
       case 'state_update': {
-        if (sessionId) getGame(sessionId).then(setGame);
+        if (sessionId) getGame(sessionId).then(setGame).catch(() => {});
         break;
       }
       case 'player_joined': {
@@ -349,6 +382,13 @@ export default function GameView() {
   // Show dice request to ALL players (not just isMyTurn) — everyone sees it
   const canRoll = diceRequest && player && diceRequest.targetPlayerId === player.playerId && !diceSubmitted;
 
+  const hpRatio = activeCharacter && activeCharacter.stats.maxHp > 0
+    ? activeCharacter.stats.hp / activeCharacter.stats.maxHp
+    : 0;
+
+  // A character at 0 HP is out of the adventure and no longer rolls.
+  const isDowned = Boolean(activeCharacter && activeCharacter.stats.hp <= 0);
+
   if (!sessionId) return <div className="page-game"><p>Invalid session</p></div>;
 
   return (
@@ -360,8 +400,9 @@ export default function GameView() {
           {connected ? 'Connected' : 'Reconnecting...'}
           {game && !gameOver && (
             <span className="event-counter">
-              &nbsp;• Event {game.session.currentEvent}/{game.session.totalEvents}
-              {narratives.length > 0 && ` (${narratives.length} narrations)`}
+              &nbsp;• Event {step?.eventNumber ?? game.session.currentEvent}/{step?.totalEvents || game.session.totalEvents}
+              {step?.encounter === 'combat' && ' • ⚔️ In Combat'}
+              {step?.encounter === 'boss' && ' • 👹 Boss Fight'}
             </span>
           )}
           {gameOver && <span className="event-counter">&nbsp;• 🏆 Complete</span>}
@@ -375,6 +416,9 @@ export default function GameView() {
           onSpeechComplete={handleSpeechComplete}
           nextStepText={nextStepText}
           audioUrl={dmAudioUrl}
+          step={step}
+          isMyTurn={isMyTurn}
+          connected={connected}
         />
       </div>
 
@@ -393,15 +437,32 @@ export default function GameView() {
         {/* Character Stats Panel */}
         {activeCharacter && (
           <div className="character-stats-panel">
+            {/* Pixel art portrait */}
+            <div className="stats-panel__portrait">
+              <img
+                className="pixel-portrait"
+                src={characterPortraitUrl(sessionId, activeCharacter)}
+                alt={`Pixel art portrait of ${activeCharacter.name}, ${activeCharacter.race} ${activeCharacter.class}`}
+                width={96}
+                height={96}
+              />
+            </div>
+
             <h3 className="stats-panel__name">{activeCharacter.name}</h3>
             <span className="stats-panel__class">{activeCharacter.race} {activeCharacter.class}</span>
+
+            {isDowned && (
+              <span className="stats-panel__downed" role="status">
+                💀 Downed — sitting out the rest of the adventure
+              </span>
+            )}
 
             {/* HP Bar */}
             <div className="stats-panel__hp">
               <div className="hp-bar">
                 <div
-                  className="hp-bar__fill"
-                  style={{ width: `${(activeCharacter.stats.hp / activeCharacter.stats.maxHp) * 100}%` }}
+                  className={`hp-bar__fill ${hpRatio <= 0.25 ? 'hp-bar__fill--critical' : hpRatio <= 0.5 ? 'hp-bar__fill--low' : ''}`}
+                  style={{ width: `${Math.max(0, Math.min(100, hpRatio * 100))}%` }}
                 />
               </div>
               <span className="hp-bar__text">❤️ {activeCharacter.stats.hp}/{activeCharacter.stats.maxHp}</span>

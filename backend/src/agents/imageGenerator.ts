@@ -3,12 +3,17 @@ import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { v4 as uuidv4 } from 'uuid';
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
+const REGION = process.env.AWS_REGION || 'us-west-2';
 const S3_BUCKET = process.env.S3_IMAGE_BUCKET || 'gen-dnd-images-383466764719';
-const IMAGE_MODEL_ID = process.env.BEDROCK_IMAGE_MODEL || 'amazon.nova-canvas-v1:0';
+const IMAGE_MODEL_ID = process.env.BEDROCK_IMAGE_MODEL || 'stability.sd3-5-large-v1:0';
+// Image models are not offered in every region, so allow overriding it independently.
+const IMAGE_REGION = process.env.BEDROCK_IMAGE_REGION || REGION;
+// The assets bucket is not necessarily in the same region as the compute. Signing
+// with the wrong region makes S3 reject the request with PermanentRedirect (301).
+const S3_REGION = process.env.S3_IMAGE_REGION || 'us-east-1';
 
-const bedrockClient = new BedrockRuntimeClient({ region: REGION });
-const s3Client = new S3Client({ region: REGION });
+const bedrockClient = new BedrockRuntimeClient({ region: IMAGE_REGION });
+const s3Client = new S3Client({ region: S3_REGION });
 
 export type ImageType = 'campaign_map' | 'character_portrait' | 'scene' | 'tile';
 
@@ -42,8 +47,12 @@ export async function generateImage(params: {
     generated = true;
     console.log(`[ImageGen] Generated image via Bedrock: ${imageType} (${label || 'no label'})`);
   } catch (err) {
-    // Fallback to placeholder
-    console.log(`[ImageGen] Bedrock unavailable, using placeholder for: ${imageType} (${label || prompt.substring(0, 50)})`);
+    // Log why generation failed — a silent fallback made this hard to diagnose.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[ImageGen] Bedrock image generation failed (model=${IMAGE_MODEL_ID} region=${IMAGE_REGION}), ` +
+        `using SVG placeholder for ${imageType}: ${reason}`
+    );
     imageBuffer = generatePlaceholderSVG(prompt, imageType, label);
   }
 
@@ -123,19 +132,32 @@ export async function generateGameAssets(params: {
 }
 
 /**
- * Try to generate an image using Bedrock (Nova Canvas / Titan Image).
+ * Generate an image with Bedrock.
+ *
+ * Stability and Amazon (Nova Canvas / Titan) use different request shapes, so
+ * the payload is chosen from the model id. Both return base64 PNGs under
+ * `images`.
  */
 async function generateWithBedrock(prompt: string): Promise<Buffer> {
-  const body = JSON.stringify({
-    taskType: 'TEXT_IMAGE',
-    textToImageParams: { text: prompt },
-    imageGenerationConfig: {
-      numberOfImages: 1,
-      height: 512,
-      width: 512,
-      cfgScale: 8.0,
-    },
-  });
+  const isStability = IMAGE_MODEL_ID.startsWith('stability.');
+
+  const body = isStability
+    ? JSON.stringify({
+        prompt,
+        mode: 'text-to-image',
+        aspect_ratio: '1:1',
+        output_format: 'png',
+      })
+    : JSON.stringify({
+        taskType: 'TEXT_IMAGE',
+        textToImageParams: { text: prompt },
+        imageGenerationConfig: {
+          numberOfImages: 1,
+          height: 512,
+          width: 512,
+          cfgScale: 8.0,
+        },
+      });
 
   const command = new InvokeModelCommand({
     modelId: IMAGE_MODEL_ID,
@@ -146,6 +168,12 @@ async function generateWithBedrock(prompt: string): Promise<Buffer> {
 
   const response = await bedrockClient.send(command);
   const result = JSON.parse(new TextDecoder().decode(response.body));
+
+  // Stability reports per-image refusals here (e.g. content filtered).
+  const refusal = result.finish_reasons?.find((r: string | null) => r);
+  if (refusal) {
+    throw new Error(`Image generation refused: ${refusal}`);
+  }
 
   if (result.images && result.images.length > 0) {
     return Buffer.from(result.images[0], 'base64');

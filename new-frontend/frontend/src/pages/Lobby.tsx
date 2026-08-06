@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getGame, joinGame, startGame, type GameDetails, type Player } from '../api/gameApi';
+import {
+  getGame,
+  joinGame,
+  startGame,
+  selectCharacter,
+  characterPortraitUrl,
+  type GameDetails,
+  type Player,
+} from '../api/gameApi';
 import { useGameEvents } from '../hooks/useGameEvents';
 
 export default function Lobby() {
@@ -11,6 +19,7 @@ export default function Lobby() {
   const [joinName, setJoinName] = useState('');
   const [joining, setJoining] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [selectingId, setSelectingId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
   // Load player from session storage
@@ -78,6 +87,28 @@ export default function Lobby() {
     }
   };
 
+  const handleSelectCharacter = async (characterId: string) => {
+    if (!sessionId || !player) return;
+    setSelectingId(characterId);
+    setError('');
+    try {
+      await selectCharacter(sessionId, player.playerId, characterId);
+      const updated = await getGame(sessionId);
+      setGame(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to select character');
+    } finally {
+      setSelectingId(null);
+    }
+  };
+
+  // Who owns which character, so the roster can show claims
+  const claimedBy = new Map<string, Player>();
+  for (const p of game?.players ?? []) {
+    if (p.character?.id) claimedBy.set(p.character.id, p);
+  }
+  const myCharacterId = game?.players.find((p) => p.playerId === player?.playerId)?.character?.id;
+
   if (!sessionId) return <div className="page-lobby"><p>Invalid session</p></div>;
 
   // Not joined yet - show join form
@@ -135,7 +166,17 @@ export default function Lobby() {
           <div className="player-list">
             {game?.players.map((p) => (
               <div key={p.playerId} className={`player-item ${p.playerId === player.playerId ? 'you' : ''}`}>
+                {p.character && sessionId && (
+                  <img
+                    className="pixel-portrait pixel-portrait--tiny"
+                    src={characterPortraitUrl(sessionId, p.character)}
+                    alt={`Portrait of ${p.character.name}`}
+                    width={32}
+                    height={32}
+                  />
+                )}
                 <span className="player-name">{p.playerName}</span>
+                {p.character && <span className="player-char">as {p.character.name}</span>}
                 {p.isHost && <span className="badge">HOST</span>}
                 {p.playerId === player.playerId && <span className="badge badge-you">YOU</span>}
               </div>
@@ -149,23 +190,52 @@ export default function Lobby() {
         </div>
 
         {/* Characters */}
-        {game?.lore?.suggestedCharacters && game.lore.suggestedCharacters.length > 0 && (
+        {game?.lore?.suggestedCharacters && game.lore.suggestedCharacters.length > 0 && sessionId && (
           <div className="lobby-section lobby-section--full">
-            <h2>⚔️ Characters</h2>
+            <h2>⚔️ Choose Your Character</h2>
+            <p className="form-hint">
+              {myCharacterId
+                ? 'You can change your pick until the adventure starts.'
+                : 'Click a character to claim it. Unclaimed players get one assigned automatically.'}
+            </p>
             <div className="character-grid">
-              {game.lore.suggestedCharacters.map((char) => (
-                <div key={char.id} className="character-card-mini">
-                  <h4>{char.name}</h4>
-                  <span className="char-class">{char.race} {char.class}</span>
-                  <p className="char-desc">{char.description}</p>
-                  <div className="char-stats-mini">
-                    <span>❤️ {char.stats.hp}</span>
-                    <span>💪 {char.stats.str}</span>
-                    <span>🏃 {char.stats.dex}</span>
-                    <span>🧠 {char.stats.int}</span>
-                  </div>
-                </div>
-              ))}
+              {game.lore.suggestedCharacters.map((char) => {
+                const owner = claimedBy.get(char.id);
+                const isMine = char.id === myCharacterId;
+                const takenByOther = owner && owner.playerId !== player.playerId;
+
+                return (
+                  <button
+                    key={char.id}
+                    type="button"
+                    className={`character-card-mini ${isMine ? 'character-card-mini--mine' : ''} ${takenByOther ? 'character-card-mini--taken' : ''}`}
+                    onClick={() => !takenByOther && handleSelectCharacter(char.id)}
+                    disabled={!!takenByOther || selectingId === char.id}
+                    aria-pressed={isMine}
+                    aria-label={`Choose ${char.name}, ${char.race} ${char.class}`}
+                  >
+                    <img
+                      className="pixel-portrait"
+                      src={characterPortraitUrl(sessionId, char)}
+                      alt={`Pixel art portrait of ${char.name}`}
+                      width={80}
+                      height={80}
+                    />
+                    <h4>{char.name}</h4>
+                    <span className="char-class">{char.race} {char.class}</span>
+                    <p className="char-desc">{char.description}</p>
+                    <div className="char-stats-mini">
+                      <span>❤️ {char.stats.hp}</span>
+                      <span>💪 {char.stats.str}</span>
+                      <span>🏃 {char.stats.dex}</span>
+                      <span>🧠 {char.stats.int}</span>
+                    </div>
+                    {isMine && <span className="char-claim char-claim--mine">✓ Your character</span>}
+                    {takenByOther && <span className="char-claim">Taken by {owner!.playerName}</span>}
+                    {selectingId === char.id && <span className="char-claim">Claiming...</span>}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}

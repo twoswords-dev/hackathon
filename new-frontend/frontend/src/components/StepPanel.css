@@ -1,0 +1,218 @@
+/*
+  Current-step panel: authoritative view of what the game is waiting on.
+  Styled to match the existing DM stage (gold on deep purple).
+*/
+
+.step-panel {
+  position: relative;
+  width: 90%;
+  margin-bottom: auto;
+  background: rgba(68, 16, 81, 0.75);
+  border: 1px solid rgba(212, 175, 55, 0.55);
+  border-radius: 14px;
+  padding: 0.9rem 1rem;
+  z-index: 2;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* Highlight when the local player is the one holding up the game */
+.step-panel--mine {
+  border-color: rgba(255, 215, 0, 0.95);
+  box-shadow: 0 0 18px rgba(255, 215, 0, 0.35);
+}
+
+.step-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.25);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.step-panel__title {
+  margin: 0;
+  color: rgba(212, 175, 55, 1);
+  font-family: "IM Fell English", serif;
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.step-panel__badges {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.step-badge {
+  font-family: sans-serif;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 0.18rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(212, 175, 55, 0.4);
+  color: #e6dced;
+  background: rgba(0, 0, 0, 0.28);
+  white-space: nowrap;
+}
+
+.step-badge--awaiting_roll {
+  background: rgba(255, 193, 7, 0.22);
+  border-color: rgba(255, 193, 7, 0.7);
+  color: #ffe082;
+}
+
+.step-badge--narrating {
+  background: rgba(33, 150, 243, 0.2);
+  border-color: rgba(33, 150, 243, 0.65);
+  color: #90caf9;
+}
+
+.step-badge--resolving {
+  background: rgba(156, 39, 176, 0.22);
+  border-color: rgba(186, 104, 200, 0.7);
+  color: #e1bee7;
+}
+
+.step-badge--complete {
+  background: rgba(76, 175, 80, 0.22);
+  border-color: rgba(76, 175, 80, 0.7);
+  color: #a5d6a7;
+}
+
+.step-badge--encounter {
+  background: rgba(244, 67, 54, 0.22);
+  border-color: rgba(244, 67, 54, 0.7);
+  color: #ef9a9a;
+}
+
+.step-panel__heading {
+  margin: 0 0 0.3rem 0;
+  color: #f5e9c8;
+  font-family: "IM Fell English", serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.step-panel__detail {
+  margin: 0;
+  color: #e6dced;
+  font-family: sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  opacity: 0.9;
+}
+
+/* Whose turn it is */
+.step-turn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.7rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(212, 175, 55, 0.3);
+}
+
+.step-turn--mine {
+  background: rgba(255, 215, 0, 0.14);
+  border-color: rgba(255, 215, 0, 0.6);
+}
+
+.step-turn__who {
+  font-family: sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #ffe082;
+}
+
+.step-turn__char {
+  font-family: sans-serif;
+  font-size: 0.82rem;
+  color: #e6dced;
+}
+
+.step-turn__dice {
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: #ffd54f;
+  margin-left: auto;
+}
+
+/* Enemy HP bar */
+.step-enemy {
+  margin-top: 0.7rem;
+}
+
+.step-enemy__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.25rem;
+}
+
+.step-enemy__name {
+  font-family: sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #ef9a9a;
+}
+
+.step-enemy__hp {
+  font-family: monospace;
+  font-size: 0.78rem;
+  color: #e6dced;
+}
+
+.step-enemy__bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  border: 1px solid rgba(244, 67, 54, 0.35);
+}
+
+.step-enemy__fill {
+  height: 100%;
+  background: linear-gradient(90deg, #b71c1c, #f44336);
+  transition: width 0.45s ease;
+}
+
+/* Last roll summary */
+.step-last-roll {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.7rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(212, 175, 55, 0.22);
+}
+
+.step-last-roll__label {
+  font-family: sans-serif;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: rgba(212, 175, 55, 0.85);
+}
+
+.step-last-roll__value {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: #fff;
+}
+
+.step-last-roll__outcome {
+  font-family: sans-serif;
+  font-size: 0.8rem;
+  color: #e6dced;
+  opacity: 0.9;
+}

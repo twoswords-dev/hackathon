@@ -2,9 +2,10 @@ import { Router, Request, Response } from 'express';
 import { gameSessions, players, gameState, gameEvents } from '../db';
 import { generateLore } from '../agents/loreGenerator';
 import { generateGameAssets } from '../agents/imageGenerator';
-import { startGameLoop, handleDiceResult, isGameRunning } from '../game/gameLoop';
+import { startGameLoop, handleDiceResult, isGameRunning, getStepInfo } from '../game/gameLoop';
+import { buildCustomCharacter, SUPPORTED_RACES, SUPPORTED_CLASSES, statsFor, normalizeRace, normalizeClass } from '../game/characterPresets';
 import { sseManager } from '../sse';
-import { CreateGameRequest, GameLength, GAME_LENGTH_EVENTS, GameMap, MapTile } from '../types/game';
+import { CreateGameRequest, GameLength, GAME_LENGTH_EVENTS, GameMap, MapTile, Character, CharacterStats } from '../types/game';
 
 const router = Router();
 
@@ -14,7 +15,9 @@ const router = Router();
  */
 router.post('/create', async (req: Request, res: Response) => {
   try {
-    const { sourceMaterial, gameLength, playerCount, hostName } = req.body as CreateGameRequest;
+    const { sourceMaterial, gameLength, playerCount, hostName, customCharacter } = req.body as CreateGameRequest & {
+      customCharacter?: { name?: string; race?: string; class?: string; description?: string };
+    };
 
     // Validate inputs
     if (!sourceMaterial || !gameLength || !playerCount || !hostName) {
@@ -69,7 +72,22 @@ router.post('/create', async (req: Request, res: Response) => {
       y: l.tileY,
     })));
 
-    // 4b. Assign SVG pixel art portrait URLs to characters
+    // 4b. If the host created their own character, put it at the front of the
+    // roster so it is the obvious pick, and auto-assign it to them.
+    let hostCharacter: Character | null = null;
+    if (customCharacter && (customCharacter.name || customCharacter.race || customCharacter.class)) {
+      hostCharacter = buildCustomCharacter({
+        id: `custom-${hostPlayer.playerId.substring(0, 8)}`,
+        name: customCharacter.name,
+        race: customCharacter.race,
+        class: customCharacter.class,
+        description: customCharacter.description,
+      });
+      worldLore.suggestedCharacters.unshift(hostCharacter);
+      console.log(`[GameCreate] Custom character: ${hostCharacter.name} (${hostCharacter.race} ${hostCharacter.class})`);
+    }
+
+    // 4c. Assign SVG pixel art portrait URLs to characters
     for (const char of worldLore.suggestedCharacters) {
       char.portraitAssetId = `/api/assets/character/${session.sessionId}/${char.id}/svg`;
     }
@@ -84,11 +102,21 @@ router.post('/create', async (req: Request, res: Response) => {
 
     console.log(`[GameCreate] Game state created with ${worldLore.eventOutlines.length} events`);
 
+    // 5b. Assign the custom character now that its portrait URL is set.
+    let responsePlayer = hostPlayer;
+    if (hostCharacter) {
+      responsePlayer = await players.assignCharacter(
+        session.sessionId,
+        hostPlayer.playerId,
+        hostCharacter
+      );
+    }
+
     // 6. Return response
     res.status(201).json({
       sessionId: session.sessionId,
       session,
-      player: hostPlayer,
+      player: responsePlayer,
       lore: {
         worldName: worldLore.worldName,
         worldDescription: worldLore.worldDescription,
@@ -106,6 +134,22 @@ router.post('/create', async (req: Request, res: Response) => {
       message: err instanceof Error ? err.message : 'Unknown error',
     });
   }
+});
+
+/**
+ * GET /api/game/character-options
+ * Race/class choices for the character creator, with the stat line each
+ * combination produces. Served from the same source the engine uses so the
+ * preview always matches what gets created.
+ */
+router.get('/character-options', (_req: Request, res: Response) => {
+  res.json({
+    races: SUPPORTED_RACES,
+    classes: SUPPORTED_CLASSES,
+    statsByCombo: SUPPORTED_RACES.flatMap((race) =>
+      SUPPORTED_CLASSES.map((cls) => ({ race, class: cls, stats: statsFor(race, cls) }))
+    ),
+  });
 });
 
 /**
@@ -375,6 +419,7 @@ router.get('/:sessionId/state', async (req: Request, res: Response) => {
       totalEvents: session.totalEvents,
       waitingForDice: state.waitingForDice,
       diceRequest,
+      step: getStepInfo(sessionId),
       narrativeHistory,
       lastNarrative: state.lastDmNarrative,
       currentTurnPlayerId: state.currentTurnPlayerId,

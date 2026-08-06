@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRive, Layout, Fit, Alignment } from "@rive-app/react-canvas";
+import StepPanel from "./StepPanel";
+import type { GameStepInfo } from "../api/gameApi";
 import "./DungeonMaster.css";
 
 interface DungeonMasterProps {
@@ -8,6 +10,9 @@ interface DungeonMasterProps {
   onSpeechComplete: () => void;
   nextStepText?: string;
   audioUrl?: string;
+  step: GameStepInfo | null;
+  isMyTurn: boolean;
+  connected: boolean;
 }
 
 const CHAR_DELAY_MS = 55;
@@ -18,6 +23,9 @@ export default function DungeonMaster({
   onSpeechComplete,
   nextStepText,
   audioUrl,
+  step,
+  isMyTurn,
+  connected,
 }: DungeonMasterProps) {
   const [revealed, setRevealed] = useState("");
   const [driftX, setDriftX] = useState(0);
@@ -120,13 +128,8 @@ export default function DungeonMaster({
     <section className="dm-stage">
       <div className="dm-stage__glow" data-active={isSpeaking} />
 
-      {/* --- NEW NEXT STEP BOX --- */}
-      <div className="dm-next-step">
-        <h3 className="dm-next-step__title">Next Step of the Game</h3>
-        <div className="dm-next-step__content">
-          <p>{nextStepText || 'Awaiting agent response...'}</p>
-        </div>
-      </div>
+      {/* Structured current-step panel (replaces the old free-text box) */}
+      <StepPanel step={step} isMyTurn={isMyTurn} connected={connected} />
 
       {/* WIZARD CONTAINER */}
       <div

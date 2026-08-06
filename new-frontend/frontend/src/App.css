@@ -905,3 +905,247 @@ select.form-input {
     grid-column: 1;
   }
 }
+
+/* ==========================================
+   PIXEL ART PORTRAITS
+   ========================================== */
+
+/* Crisp upscaling — these are 16x16 sprites rendered as SVG */
+.pixel-portrait {
+  image-rendering: pixelated;
+  border-radius: 8px;
+  border: 1px solid rgba(212, 175, 55, .35);
+  background: rgba(0, 0, 0, .3);
+  display: block;
+  width: 80px;
+  height: 80px;
+}
+
+.pixel-portrait--tiny {
+  width: 32px;
+  height: 32px;
+  border-radius: 5px;
+}
+
+.pixel-portrait--large {
+  width: 128px;
+  height: 128px;
+  border-radius: 10px;
+}
+
+.stats-panel__portrait {
+  display: flex;
+  justify-content: center;
+  margin-bottom: .25rem;
+}
+
+.stats-panel__portrait .pixel-portrait {
+  width: 96px;
+  height: 96px;
+}
+
+/* Downed characters no longer act; make that unmistakable */
+.stats-panel__downed {
+  font-size: .72rem;
+  font-weight: 700;
+  color: #ef9a9a;
+  background: rgba(244, 67, 54, .14);
+  border: 1px solid rgba(244, 67, 54, .5);
+  border-radius: 6px;
+  padding: .3rem .5rem;
+  text-align: center;
+}
+
+/* HP bar severity states */
+.hp-bar__fill--low {
+  background: linear-gradient(90deg, #e67e22, #f1c40f);
+}
+
+.hp-bar__fill--critical {
+  background: linear-gradient(90deg, #8e1b1b, #e74c3c);
+}
+
+/* ==========================================
+   LOBBY CHARACTER SELECTION
+   ========================================== */
+
+/* character-card-mini is a <button> now, so reset button chrome */
+.character-card-mini {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .35rem;
+  text-align: center;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .2s ease, box-shadow .2s ease, transform .15s ease;
+}
+
+.character-card-mini:hover:not(:disabled) {
+  border-color: rgba(212, 175, 55, .8);
+  transform: translateY(-2px);
+}
+
+.character-card-mini:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.character-card-mini--mine {
+  border-color: rgba(255, 215, 0, .95);
+  box-shadow: 0 0 14px rgba(255, 215, 0, .3);
+  background: rgba(255, 215, 0, .08);
+}
+
+.character-card-mini--taken {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.char-claim {
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-dim);
+  margin-top: .2rem;
+}
+
+.char-claim--mine {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.player-item .player-char {
+  font-size: .72rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.player-item {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+
+/* ==========================================
+   CHARACTER CREATION (CREATE GAME PAGE)
+   ========================================== */
+
+.char-create__body {
+  display: grid;
+  grid-template-columns: minmax(150px, 190px) 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.char-create__preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .3rem;
+  padding: .9rem;
+  background: rgba(0, 0, 0, .25);
+  border: 1px solid rgba(212, 175, 55, .3);
+  border-radius: 10px;
+}
+
+.char-create__preview-name {
+  color: var(--gold);
+  font-family: "Cinzel", serif;
+  font-size: .95rem;
+  margin-top: .35rem;
+  text-align: center;
+}
+
+.char-create__preview-sub {
+  font-size: .72rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.char-create__stats {
+  width: 100%;
+  margin-top: .5rem;
+  padding-top: .5rem;
+  border-top: 1px solid rgba(212, 175, 55, .2);
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+
+.char-create__hp {
+  font-size: .8rem;
+  color: #f39c12;
+  text-align: center;
+  font-weight: 700;
+}
+
+.char-create__stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .25rem;
+  font-size: .68rem;
+  color: var(--text-dim);
+  font-family: monospace;
+  text-align: center;
+}
+
+.char-create__fields {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+
+.form-label--sub {
+  font-size: .72rem !important;
+  color: var(--text-dim) !important;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-top: .5rem;
+  display: block;
+}
+
+.chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+}
+
+.chip {
+  background: rgba(0, 0, 0, .25);
+  border: 1px solid rgba(212, 175, 55, .3);
+  color: var(--text);
+  border-radius: 999px;
+  padding: .4rem .75rem;
+  font-size: .8rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease;
+}
+
+.chip:hover {
+  border-color: rgba(212, 175, 55, .7);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.chip--active {
+  background: rgba(212, 175, 55, .2);
+  border-color: var(--gold);
+  color: var(--gold);
+  font-weight: 700;
+}
+
+@media (max-width: 700px) {
+  .char-create__body {
+    grid-template-columns: 1fr;
+  }
+
+  .char-create__preview {
+    order: -1;
+  }
+}
