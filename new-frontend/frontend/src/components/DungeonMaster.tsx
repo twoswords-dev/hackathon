@@ -8,8 +8,6 @@ interface DungeonMasterProps {
   isSpeaking: boolean;
   speechText: string;
   onSpeechComplete: () => void;
-  nextStepText?: string;
-  audioUrl?: string;
   step: GameStepInfo | null;
   isMyTurn: boolean;
   connected: boolean;
@@ -21,8 +19,6 @@ export default function DungeonMaster({
   isSpeaking,
   speechText,
   onSpeechComplete,
-  nextStepText,
-  audioUrl,
   step,
   isMyTurn,
   connected,
@@ -32,7 +28,6 @@ export default function DungeonMaster({
   const [driftY, setDriftY] = useState(0);
 
   const intervalRef = useRef<number | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const { rive, RiveComponent } = useRive({
     src: "/wizard.riv",
@@ -51,33 +46,6 @@ export default function DungeonMaster({
     console.log("Animations:", rive.animationNames);
     console.log("State Machines:", rive.stateMachineNames);
   }, [rive]);
-
-  // Audio playback
-  useEffect(() => {
-    if (!isSpeaking || !audioUrl) {
-      // Stop any playing audio when speech ends
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      return;
-    }
-
-    const audio = new Audio(audioUrl);
-    audioRef.current = audio;
-
-    audio.play().catch((err) => {
-      console.warn("[DungeonMaster] Audio playback failed:", err);
-      // Graceful degradation — typewriter still works without audio
-    });
-
-    // Cleanup on unmount or when audioUrl changes
-    return () => {
-      audio.pause();
-      audio.src = "";
-      audioRef.current = null;
-    };
-  }, [isSpeaking, audioUrl]);
 
   // Speech typing
   useEffect(() => {
