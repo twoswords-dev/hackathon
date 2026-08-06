@@ -7,6 +7,7 @@ import gameRoutes from './routes/game';
 import assetRoutes from './routes/assets';
 import diceRoutes from './routes/dice';
 import chatRoutes from './routes/chat';
+import audioRoutes from './routes/audio';
 
 dotenv.config();
 
@@ -52,6 +53,7 @@ app.use('/api/game', gameRoutes);
 app.use('/api/assets', assetRoutes);
 app.use('/api/dice', diceRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/audio', audioRoutes);
 
 /**
  * SSE stream for real-time game events.

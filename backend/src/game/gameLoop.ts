@@ -1,5 +1,6 @@
 import { gameSessions, players, gameEvents, gameState } from '../db';
 import { generateNarrative, DMResponse } from '../agents/dungeonMaster';
+import { synthesizeAndCache } from '../agents/pollyNarrator';
 import { sseManager } from '../sse';
 import { DiceResultInput, GameState, Player, StatChange } from '../types/game';
 
@@ -201,11 +202,15 @@ async function generateAndBroadcastNarrative(
   // Update current turn player
   await gameState.updateTurn(sessionId, activePlayer.playerId, state.turnNumber + 1);
 
+  // Synthesize TTS audio (non-blocking — won't fail the event if Polly errors)
+  const audioUrl = await synthesizeAndCache(sessionId, eventNumber, dmResponse.narrative_text);
+
   // Broadcast narrative with character info
   sseManager.emit(sessionId, 'narrative', {
     text: dmResponse.narrative_text,
     eventNumber,
     title: eventOutline.title,
+    audioUrl,
     characterName: character.name,
     characterClass: character.class,
     playerName: activePlayer.playerName,

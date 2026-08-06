@@ -46,6 +46,7 @@ export default function GameView() {
   // DM speech state (drives DungeonMaster component)
   const [isDmSpeaking, setIsDmSpeaking] = useState(false);
   const [dmSpeechText, setDmSpeechText] = useState('');
+  const [dmAudioUrl, setDmAudioUrl] = useState<string | undefined>(undefined);
   const [nextStepText, setNextStepText] = useState('Awaiting the Dungeon Master...');
 
   // Chat state
@@ -136,7 +137,7 @@ export default function GameView() {
   const handleSSEEvent = useCallback((event: SSEEvent) => {
     switch (event.type) {
       case 'narrative': {
-        const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string };
+        const data = event.data as { text: string; eventNumber: number; title: string; diceResult?: number; diceType?: string; outcome?: string; audioUrl?: string };
         const entry: NarrativeEntry = {
           text: data.text,
           eventNumber: data.eventNumber,
@@ -154,6 +155,7 @@ export default function GameView() {
 
         // Trigger DM speech
         setDmSpeechText(data.text);
+        setDmAudioUrl(data.audioUrl);
         setIsDmSpeaking(true);
         setNextStepText(data.text);
         setIsDmThinking(false);
@@ -372,6 +374,7 @@ export default function GameView() {
           speechText={dmSpeechText}
           onSpeechComplete={handleSpeechComplete}
           nextStepText={nextStepText}
+          audioUrl={dmAudioUrl}
         />
       </div>
 
